@@ -1,0 +1,15 @@
+[Unit]
+Description=ttyd web terminal for Claude Code
+After=network-online.target claude-tmux.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Update PATH to include your bin directories and node installation
+Environment=PATH=%h/bin:%h/.nvm/versions/node/v22.17.0/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/ttyd --port 7681 --interface tailscale0 bash -c 'export PATH="$HOME/bin:$PATH"; claude-session'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

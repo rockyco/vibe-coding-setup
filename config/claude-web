@@ -1,0 +1,17 @@
+#!/bin/bash
+# claude-web: Start Claude Code in a web terminal (ttyd)
+# Access via browser on your Tailscale network
+
+PORT="${1:-7681}"
+TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || echo "0.0.0.0")
+
+echo "Starting Claude Code web terminal..."
+echo "Access at: http://${TAILSCALE_IP}:${PORT}"
+echo "Press Ctrl+C to stop"
+echo ""
+
+# Run ttyd bound to Tailscale interface only (secure: not exposed to public internet)
+exec ttyd \
+    --port "$PORT" \
+    --interface tailscale0 \
+    bash -c 'export PATH="$HOME/bin:$PATH"; source ~/.bashrc; claude-session'

@@ -1,0 +1,154 @@
+#!/bin/bash
+# claude-session: Manage persistent Claude Code tmux sessions
+#
+# Usage:
+#   claude-session [name]     - Attach to session (creates if needed)
+#   claude-session -l         - List sessions
+#   claude-session -k [name]  - Kill session
+#   claude-session -n name    - Create new session (don't attach)
+
+set -e
+
+SESSION_PREFIX="claude"
+DEFAULT_SESSION="${SESSION_PREFIX}-main"
+
+show_help() {
+    cat << 'EOF'
+claude-session - Persistent Claude Code tmux sessions
+
+Usage:
+  claude-session              Attach to default session
+  claude-session <name>       Attach to named session
+  claude-session -l           List all claude sessions
+  claude-session -k [name]    Kill session (default if no name)
+  claude-session -n <name>    Create new session without attaching
+  claude-session -r [name]    Recreate session (kill + create fresh)
+  claude-session -h           Show this help
+
+Examples:
+  claude-session              Attach to claude-main
+  claude-session project      Attach to claude-project
+  claude-session -n experiment Create claude-experiment in background
+  claude-session -r           Reset default session with 6 windows
+EOF
+}
+
+list_sessions() {
+    echo "Claude Code sessions:"
+    tmux list-sessions 2>/dev/null | grep "^${SESSION_PREFIX}" || echo "  (none)"
+}
+
+create_session() {
+    local name="$1"
+    local attach="$2"
+
+    if tmux has-session -t "$name" 2>/dev/null; then
+        echo "Session '$name' already exists"
+        if [[ "$attach" == "yes" ]]; then
+            tmux attach -t "$name"
+        fi
+        return
+    fi
+
+    echo "Creating session: $name"
+
+    # Create session with 6 panes in 3x2 grid layout
+    # Layout:
+    #   +-------+-------+-------+
+    #   |   1   |   2   |   3   |  (Claude in pane 1)
+    #   +-------+-------+-------+
+    #   |   4   |   5   |   6   |
+    #   +-------+-------+-------+
+
+    # Create session with large size to allow 6 panes
+    tmux new-session -d -s "$name" -n "main" -x 200 -y 50 -c "$HOME"
+
+    # Split into top and bottom rows
+    tmux split-window -t "$name:main" -v -c "$HOME"
+
+    # Split top row into 3 columns (pane 1 is top)
+    tmux select-pane -t "$name:main.1"
+    tmux split-window -t "$name:main" -h -c "$HOME"
+    tmux split-window -t "$name:main" -h -c "$HOME"
+
+    # Split bottom row into 3 columns (pane 4 is bottom after top splits)
+    tmux select-pane -t "$name:main.4"
+    tmux split-window -t "$name:main" -h -c "$HOME"
+    tmux split-window -t "$name:main" -h -c "$HOME"
+
+    # Balance the layout
+    tmux select-layout -t "$name:main" tiled
+
+    # Start Claude Code in first pane (top-left)
+    tmux send-keys -t "$name:main.1" 'claude' Enter
+
+    # Select first pane
+    tmux select-pane -t "$name:main.1"
+
+    echo "Session '$name' created with 6 panes (3x2 grid)"
+
+    if [[ "$attach" == "yes" ]]; then
+        tmux attach -t "$name"
+    fi
+}
+
+kill_session() {
+    local name="$1"
+    if tmux has-session -t "$name" 2>/dev/null; then
+        tmux kill-session -t "$name"
+        echo "Killed session: $name"
+    else
+        echo "Session '$name' not found"
+    fi
+}
+
+attach_session() {
+    local name="$1"
+
+    if tmux has-session -t "$name" 2>/dev/null; then
+        tmux attach -t "$name"
+    else
+        create_session "$name" "yes"
+    fi
+}
+
+# Parse arguments
+case "${1:-}" in
+    -h|--help)
+        show_help
+        ;;
+    -l|--list)
+        list_sessions
+        ;;
+    -k|--kill)
+        name="${2:-$DEFAULT_SESSION}"
+        [[ "$name" != ${SESSION_PREFIX}-* ]] && name="${SESSION_PREFIX}-${name}"
+        kill_session "$name"
+        ;;
+    -n|--new)
+        if [[ -z "${2:-}" ]]; then
+            echo "Error: -n requires a session name"
+            exit 1
+        fi
+        name="${SESSION_PREFIX}-${2}"
+        create_session "$name" "no"
+        ;;
+    -r|--recreate)
+        name="${2:-$DEFAULT_SESSION}"
+        [[ "$name" != ${SESSION_PREFIX}-* ]] && name="${SESSION_PREFIX}-${name}"
+        kill_session "$name" 2>/dev/null || true
+        create_session "$name" "yes"
+        ;;
+    "")
+        attach_session "$DEFAULT_SESSION"
+        ;;
+    -*)
+        echo "Unknown option: $1"
+        show_help
+        exit 1
+        ;;
+    *)
+        name="${SESSION_PREFIX}-${1}"
+        attach_session "$name"
+        ;;
+esac
