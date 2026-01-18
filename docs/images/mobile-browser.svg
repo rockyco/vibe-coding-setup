@@ -26,7 +26,7 @@
 
   <!-- URL bar -->
   <rect x="20" y="58" width="240" height="24" rx="4" fill="#1a1a2e"/>
-  <text x="30" y="74" fill="#68d391" font-family="monospace" font-size="9">100.65.168.106:7681</text>
+  <text x="30" y="74" fill="#68d391" font-family="monospace" font-size="9">&lt;tailscale-ip&gt;:7681</text>
 
   <!-- Refresh button -->
   <circle cx="280" cy="70" r="10" fill="#4a5568"/>

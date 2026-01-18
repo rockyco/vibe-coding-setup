@@ -70,6 +70,23 @@ After installation, access from your phone:
 2. Open browser to `http://<your-tailscale-ip>:7681`
 3. Start coding!
 
+### Getting Your Tailscale IP
+
+> **Important**: Tailscale must be installed on BOTH your server AND your phone/tablet.
+
+**On your server**, run:
+```bash
+tailscale ip -4
+```
+
+This returns your server's Tailscale IP address (e.g., `100.x.x.x`). Use this IP to connect from any device on your Tailscale network.
+
+**On your phone/tablet**:
+- **iOS**: [Download Tailscale from App Store](https://apps.apple.com/app/tailscale/id1470499037)
+- **Android**: [Download Tailscale from Play Store](https://play.google.com/store/apps/details?id=com.tailscale.ipn)
+
+Sign in with the same account you used on your server. Once connected, open your mobile browser and navigate to `http://<your-tailscale-ip>:7681`.
+
 ## Prerequisites
 
 | Requirement | Purpose | Install Command |
