@@ -4,11 +4,18 @@ After=network.target
 
 [Service]
 Type=forking
-Environment=PATH=%h/bin:%h/.nvm/versions/node/v22.17.0/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=%h/bin/claude-session -n main
+Environment=PATH=/home/amd/bin:/home/amd/.nvm/versions/node/v22.17.0/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/amd/bin/claude-session -n main
 ExecStop=/usr/bin/tmux kill-session -t claude-main
 Restart=on-failure
 RestartSec=5
+
+# OOM protection - prevent systemd-oomd from killing this service
+# Set higher threshold (90%) before considering for OOM kill
+ManagedOOMMemoryPressure=kill
+ManagedOOMMemoryPressureLimit=90%
+# Lower OOM score makes kernel less likely to kill this process (-1000 to 1000)
+OOMScoreAdjust=-500
 
 [Install]
 WantedBy=default.target
