@@ -244,17 +244,69 @@ claude-session -n test      # Create claude-test without attaching
 claude-session -r           # Recreate default session (fresh 6-pane layout)
 ```
 
-### tmux Shortcuts
+### iOS Keyboard Support
 
-| Shortcut | Action |
-|----------|--------|
-| `Ctrl-b d` | Detach from session |
-| `Ctrl-b [` | Enter scroll mode |
-| `Ctrl-b z` | Zoom current pane |
-| `Ctrl-b \|` | Split pane vertically |
-| `Ctrl-b -` | Split pane horizontally |
-| `Ctrl-b arrows` | Navigate panes |
-| `Ctrl-b r` | Reload tmux config |
+This setup replaces the standard tmux prefix (`Ctrl+B`) with a single quote (`'`), making all tmux operations accessible on iOS where Ctrl and Tab keys are unavailable.
+
+**How it works:**
+1. Press `'` (single quote) as the prefix key
+2. Press the action key within 1 second
+
+Example: To interrupt a running command, type `'c` (single quote, then c).
+
+#### Control Key Alternatives
+
+| Keys | Equivalent | Purpose |
+|------|------------|---------|
+| `'c` | Ctrl+C | Interrupt running command |
+| `'d` | Ctrl+D | EOF / exit shell |
+| `'l` | Ctrl+L | Clear screen |
+| `'z` | Ctrl+Z | Suspend process |
+| `'a` | Ctrl+A | Beginning of line |
+| `'e` | Ctrl+E | End of line |
+| `'k` | Ctrl+K | Kill to end of line |
+| `'u` | Ctrl+U | Kill to beginning of line |
+| `'w` | Ctrl+W | Delete word backward |
+| `'r` | Ctrl+R | Reverse search history |
+
+#### Tab and Navigation
+
+| Keys | Equivalent | Purpose |
+|------|------------|---------|
+| `'t` | Tab | Shell completion |
+| `'T` | Shift+Tab | Reverse completion |
+| `'[` | Escape | Escape key |
+| `'i` | Up arrow | Previous command |
+| `'o` | Down arrow | Next command |
+| `'b` | Left arrow | Move cursor left |
+| `'f` | Right arrow | Move cursor right |
+
+#### Tmux Operations
+
+| Keys | Purpose |
+|------|---------|
+| `'C` | New window |
+| `'N` / `'P` | Next / Previous window |
+| `'W` | Choose window (interactive) |
+| `'v` | Split pane vertically |
+| `'s` | Split pane horizontally |
+| `'H/J/K/L` | Navigate panes (vim-style) |
+| `'Z` | Zoom pane toggle |
+| `'X` | Kill pane |
+| `'D` | Detach session |
+| `'p` | Popup terminal (80% screen) |
+| `'g` | Git popup (lazygit or status) |
+| `''` | Type literal single quote |
+
+#### Copy and Paste
+
+| Keys | Purpose |
+|------|---------|
+| `'Enter` | Enter copy mode |
+| `'V` | Paste from tmux buffer |
+| `'Y` | Show buffer in popup (for manual copy) |
+
+**Note**: These bindings work on both iOS and laptop - no need to remember different shortcuts.
 
 ## The 6-Pane Layout
 
@@ -288,6 +340,28 @@ The default layout creates a 3x2 grid:
 - Pane 4-6: Git operations, file navigation, ad-hoc commands
 
 ## Troubleshooting
+
+### Known iOS Safari Limitations
+
+#### Touch Screen Copy Does Not Work
+
+iOS Safari blocks the Clipboard API for security. The copy chain (tmux -> ttyd -> xterm.js -> browser -> iOS clipboard) breaks at the browser level.
+
+**Workarounds:**
+1. **Manual selection**: Touch and hold text, use iOS native "Copy" from context menu
+2. **Copy mode**: `'Enter` to enter copy mode, use `v` to select, `y` to yank to tmux buffer, then `'V` to paste within terminal
+3. **View buffer**: `'Y` shows the tmux buffer in a popup - you can manually select and copy from there
+
+**For full clipboard integration**: Use SSH from a native terminal app (like Termius or Blink) instead of the web terminal.
+
+#### iOS Spacebar Arrow Simulation Does Not Work
+
+The iOS "long-press spacebar and drag" trackpad feature does not work in web terminals. This feature only works in native iOS apps - the browser intercepts touch events.
+
+**Use these instead:**
+- `'i` / `'o` for Up/Down (command history)
+- `'b` / `'f` for Left/Right (cursor movement)
+- `'a` / `'e` for beginning/end of line
 
 ### Service won't start
 
