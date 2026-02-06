@@ -17,8 +17,9 @@ Thumbs.db
 test/
 tmp/
 
-# Docs
-docs/
+# Docs (social media posts)
+docs/linkedin-post*.md
+docs/x-post*.md
 
 # Firebase
 firebase-debug.log
