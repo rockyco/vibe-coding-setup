@@ -16,3 +16,9 @@ Thumbs.db
 # Test artifacts
 test/
 tmp/
+
+# Docs
+docs/
+
+# Firebase
+firebase-debug.log
