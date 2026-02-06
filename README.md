@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/Vibe-Coding.png" alt="Vibe Coding Setup" width="600"/>
+</p>
+
 # Vibe Coding Setup
 
 **Access Claude Code from your phone, tablet, or any device with a web browser.**
