@@ -58,6 +58,10 @@ Two web terminal options are available:
 - **agentboard** (recommended for mobile/iOS) - serves on port 4040 with native clipboard support, on-screen mobile controls, DPad navigation, and Claude session tracking
 - **ttyd** (lightweight alternative) - serves on port 7681, minimal dependencies
 
+<p align="center">
+  <img src="docs/images/agentboard-controls.svg" alt="Agentboard on-screen controls" width="500"/>
+</p>
+
 Both use:
 - **tmux** for persistent sessions with multiple panes
 - **Tailscale** for secure access (only your devices can connect)
@@ -355,6 +359,10 @@ The default layout creates a 3x2 grid:
 ### Known iOS Safari Limitations
 
 #### Clipboard (Copy/Paste)
+
+<p align="center">
+  <img src="docs/images/clipboard-flow.svg" alt="Clipboard comparison: agentboard vs ttyd" width="600"/>
+</p>
 
 **With agentboard**: Clipboard works. Agentboard uses multiple strategies - Clipboard API with readText fallback, a manual paste modal, and iOS native long-press text selection via xterm.js screenReaderMode. Use the on-screen Paste button or long-press to select and copy.
 
