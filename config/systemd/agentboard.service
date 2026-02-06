@@ -1,0 +1,20 @@
+[Unit]
+Description=Agentboard web terminal for Claude Code
+After=network-online.target claude-tmux.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.agentboard-app
+# HOSTNAME binds to Tailscale interface only (resolved at service start)
+# TMUX_SESSION connects to our existing claude-main session
+Environment=NODE_ENV=production
+Environment=PORT=4040
+Environment=TMUX_SESSION=claude-main
+# Resolve Tailscale IP at start and pass as HOSTNAME
+ExecStart=/bin/bash -c 'export HOSTNAME=$(tailscale ip -4); export PATH="%h/.bun/bin:%h/bin:/usr/local/bin:/usr/bin:/bin"; cd %h/.agentboard-app && bun run start'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

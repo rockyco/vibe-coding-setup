@@ -60,7 +60,7 @@ echo "This script will set up:"
 echo "  - claude-session script for managing tmux sessions"
 echo "  - Mobile-friendly tmux configuration"
 echo "  - systemd services for auto-start"
-echo "  - Web terminal access via ttyd"
+echo "  - Web terminal (agentboard or ttyd)"
 echo ""
 read -p "Continue? [Y/n] " -n 1 -r
 echo ""
@@ -68,6 +68,24 @@ if [[ ! $REPLY =~ ^[Yy]?$ ]]; then
     echo "Aborted."
     exit 1
 fi
+
+# Choose web terminal
+echo ""
+log_info "Choose your web terminal:"
+echo ""
+echo "  [1] agentboard - full mobile support with iOS clipboard, on-screen"
+echo "      controls, DPad, session tracking (requires Bun)"
+echo ""
+echo "  [2] ttyd - lightweight, no extra dependencies"
+echo ""
+read -p "Choice [1/2]: " -n 1 -r WEB_TERMINAL_CHOICE
+echo ""
+if [[ "$WEB_TERMINAL_CHOICE" == "2" ]]; then
+    WEB_TERMINAL="ttyd"
+else
+    WEB_TERMINAL="agentboard"
+fi
+log_info "Selected: $WEB_TERMINAL"
 
 echo ""
 log_info "Checking prerequisites..."
@@ -80,8 +98,10 @@ if ! check_command tmux; then
     MISSING_DEPS+=("tmux")
 fi
 
-if ! check_command ttyd; then
-    MISSING_DEPS+=("ttyd")
+if [[ "$WEB_TERMINAL" == "ttyd" ]]; then
+    if ! check_command ttyd; then
+        MISSING_DEPS+=("ttyd")
+    fi
 fi
 
 if ! check_command tailscale; then
@@ -144,6 +164,53 @@ if [[ ":$PATH:" != *":$HOME/bin:"* ]]; then
     log_success "Added ~/bin to PATH"
 fi
 
+# Install agentboard if selected
+if [[ "$WEB_TERMINAL" == "agentboard" ]]; then
+    echo ""
+    log_info "Setting up agentboard..."
+
+    # Install Bun if not present
+    if ! command -v bun &> /dev/null; then
+        log_info "Installing Bun runtime..."
+        curl -fsSL https://bun.sh/install | bash
+        export BUN_INSTALL="$HOME/.bun"
+        export PATH="$BUN_INSTALL/bin:$PATH"
+        if command -v bun &> /dev/null; then
+            log_success "Bun $(bun --version) installed"
+        else
+            log_error "Bun installation failed. Install manually: https://bun.sh"
+            exit 1
+        fi
+    else
+        log_success "Bun $(bun --version) found"
+    fi
+
+    # Check Bun version >= 1.3.6
+    BUN_VERSION=$(bun --version)
+    BUN_MAJOR=$(echo "$BUN_VERSION" | cut -d. -f1)
+    BUN_MINOR=$(echo "$BUN_VERSION" | cut -d. -f2)
+    BUN_PATCH=$(echo "$BUN_VERSION" | cut -d. -f3)
+    if [[ "$BUN_MAJOR" -lt 1 ]] || [[ "$BUN_MAJOR" -eq 1 && "$BUN_MINOR" -lt 3 ]] || \
+       [[ "$BUN_MAJOR" -eq 1 && "$BUN_MINOR" -eq 3 && "$BUN_PATCH" -lt 6 ]]; then
+        log_warn "Bun $BUN_VERSION found but 1.3.6+ required (PTY bugs in older versions)"
+        log_info "Updating Bun..."
+        bun upgrade
+    fi
+
+    # Clone or update agentboard
+    if [ -d "$HOME/.agentboard-app" ]; then
+        log_info "Updating existing agentboard installation..."
+        cd "$HOME/.agentboard-app" && git pull && bun install && bun run build
+        cd "$SCRIPT_DIR"
+    else
+        log_info "Cloning agentboard..."
+        git clone https://github.com/gbasin/agentboard.git "$HOME/.agentboard-app"
+        cd "$HOME/.agentboard-app" && bun install && bun run build
+        cd "$SCRIPT_DIR"
+    fi
+    log_success "Agentboard installed to ~/.agentboard-app"
+fi
+
 echo ""
 log_info "Installing tmux configuration..."
 
@@ -164,23 +231,33 @@ mkdir -p ~/.config/systemd/user
 
 # Copy service files
 cp "$SCRIPT_DIR/config/systemd/claude-tmux.service" ~/.config/systemd/user/
-cp "$SCRIPT_DIR/config/systemd/ttyd.service" ~/.config/systemd/user/
 
-# Update ttyd.service with correct node path
-NODE_PATH=""
-if command -v node &> /dev/null; then
-    NODE_PATH="$(dirname $(which node))"
+if [[ "$WEB_TERMINAL" == "agentboard" ]]; then
+    cp "$SCRIPT_DIR/config/systemd/agentboard.service" ~/.config/systemd/user/
+    log_success "systemd services installed (claude-tmux + agentboard)"
+
+    systemctl --user daemon-reload
+    systemctl --user enable claude-tmux.service agentboard.service
+    # Disable ttyd if it was previously enabled
+    systemctl --user disable ttyd.service 2>/dev/null || true
+else
+    cp "$SCRIPT_DIR/config/systemd/ttyd.service" ~/.config/systemd/user/
+
+    # Update ttyd.service with correct node path
+    NODE_PATH=""
+    if command -v node &> /dev/null; then
+        NODE_PATH="$(dirname $(which node))"
+    fi
+    sed -i "s|%h/.nvm/versions/node/v22.17.0/bin|${NODE_PATH:-/usr/local/bin}|g" \
+        ~/.config/systemd/user/ttyd.service
+
+    log_success "systemd services installed (claude-tmux + ttyd)"
+
+    systemctl --user daemon-reload
+    systemctl --user enable claude-tmux.service ttyd.service
+    # Disable agentboard if it was previously enabled
+    systemctl --user disable agentboard.service 2>/dev/null || true
 fi
-
-# Update the PATH in ttyd.service
-sed -i "s|%h/.nvm/versions/node/v22.17.0/bin|${NODE_PATH:-/usr/local/bin}|g" \
-    ~/.config/systemd/user/ttyd.service
-
-log_success "systemd services installed"
-
-# Reload and enable services
-systemctl --user daemon-reload
-systemctl --user enable claude-tmux.service ttyd.service
 
 log_success "Services enabled"
 
@@ -209,16 +286,23 @@ fi
 # Start services
 echo ""
 log_info "Starting services..."
-systemctl --user start claude-tmux.service ttyd.service
 
-# Wait a moment for services to start
-sleep 2
-
-# Check status
-if systemctl --user is-active --quiet ttyd.service; then
-    log_success "ttyd service running"
+if [[ "$WEB_TERMINAL" == "agentboard" ]]; then
+    systemctl --user start claude-tmux.service agentboard.service
+    sleep 2
+    if systemctl --user is-active --quiet agentboard.service; then
+        log_success "agentboard service running"
+    else
+        log_warn "agentboard service may have issues - check with: journalctl --user -u agentboard.service"
+    fi
 else
-    log_warn "ttyd service may have issues - check with: journalctl --user -u ttyd.service"
+    systemctl --user start claude-tmux.service ttyd.service
+    sleep 2
+    if systemctl --user is-active --quiet ttyd.service; then
+        log_success "ttyd service running"
+    else
+        log_warn "ttyd service may have issues - check with: journalctl --user -u ttyd.service"
+    fi
 fi
 
 # Get access URL
@@ -231,16 +315,29 @@ echo -e "${GREEN}============================================${NC}"
 echo ""
 echo "Access your Claude Code session:"
 echo ""
-echo -e "  ${BLUE}http://${TAILSCALE_IP}:7681${NC}"
-echo ""
-echo "Quick commands:"
-echo "  claude-session       - Attach to session locally"
-echo "  claude-session -l    - List sessions"
-echo "  claude-session -r    - Recreate session"
-echo ""
-echo "Services:"
-echo "  systemctl --user status ttyd.service"
-echo "  systemctl --user status claude-tmux.service"
+if [[ "$WEB_TERMINAL" == "agentboard" ]]; then
+    echo -e "  ${BLUE}http://${TAILSCALE_IP}:4040${NC}"
+    echo ""
+    echo "Quick commands:"
+    echo "  claude-session       - Attach to session locally"
+    echo "  claude-session -l    - List sessions"
+    echo "  claude-session -r    - Recreate session"
+    echo ""
+    echo "Services:"
+    echo "  systemctl --user status agentboard.service"
+    echo "  systemctl --user status claude-tmux.service"
+else
+    echo -e "  ${BLUE}http://${TAILSCALE_IP}:7681${NC}"
+    echo ""
+    echo "Quick commands:"
+    echo "  claude-session       - Attach to session locally"
+    echo "  claude-session -l    - List sessions"
+    echo "  claude-session -r    - Recreate session"
+    echo ""
+    echo "Services:"
+    echo "  systemctl --user status ttyd.service"
+    echo "  systemctl --user status claude-tmux.service"
+fi
 echo ""
 echo "On your phone:"
 echo "  1. Install Tailscale app"

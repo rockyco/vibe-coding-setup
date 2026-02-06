@@ -42,7 +42,8 @@ A complete setup for persistent Claude Code sessions accessible via web terminal
         |                                                    |       |       |       |
         |                                                    | Claude|  sh2  |  sh3  |
         +---------------------------------------------------->       |       |       |
-                      http://100.x.x.x:7681                  +-------+-------+-------+
+                http://100.x.x.x:4040 (agentboard)           +-------+-------+-------+
+                http://100.x.x.x:7681 (ttyd)
                                                              |       |       |       |
                                                              |  sh4  |  sh5  |  sh6  |
                                                              |       |       |       |
@@ -52,10 +53,15 @@ A complete setup for persistent Claude Code sessions accessible via web terminal
 
 ### How It Works
 
-1. **ttyd** serves a web terminal on port 7681
-2. **tmux** provides persistent sessions with multiple panes
-3. **Tailscale** secures access (only your devices can connect)
-4. **systemd** keeps everything running after reboots
+Two web terminal options are available:
+
+- **agentboard** (recommended for mobile/iOS) - serves on port 4040 with native clipboard support, on-screen mobile controls, DPad navigation, and Claude session tracking
+- **ttyd** (lightweight alternative) - serves on port 7681, minimal dependencies
+
+Both use:
+- **tmux** for persistent sessions with multiple panes
+- **Tailscale** for secure access (only your devices can connect)
+- **systemd** to keep everything running after reboots
 
 ## Quick Start
 
@@ -71,7 +77,7 @@ cd vibe-coding-setup
 
 After installation, access from your phone:
 1. Install Tailscale on your phone
-2. Open browser to `http://<your-tailscale-ip>:7681`
+2. Open browser to `http://<your-tailscale-ip>:4040` (agentboard) or `:7681` (ttyd)
 3. Start coding!
 
 ### Getting Your Tailscale IP
@@ -89,7 +95,7 @@ This returns your server's Tailscale IP address (e.g., `100.x.x.x`). Use this IP
 - **iOS**: [Download Tailscale from App Store](https://apps.apple.com/app/tailscale/id1470499037)
 - **Android**: [Download Tailscale from Play Store](https://play.google.com/store/apps/details?id=com.tailscale.ipn)
 
-Sign in with the same account you used on your server. Once connected, open your mobile browser and navigate to `http://<your-tailscale-ip>:7681`.
+Sign in with the same account you used on your server. Once connected, open your mobile browser and navigate to `http://<your-tailscale-ip>:4040` (agentboard) or `http://<your-tailscale-ip>:7681` (ttyd).
 
 ## Prerequisites
 
@@ -97,9 +103,10 @@ Sign in with the same account you used on your server. Once connected, open your
 |------------|---------|-----------------|
 | Linux with systemd | Service management | (most distros) |
 | tmux | Terminal multiplexer | `sudo apt install tmux` |
-| ttyd | Web terminal | See below |
 | Tailscale | Secure VPN | `curl -fsSL https://tailscale.com/install.sh \| sh` |
 | Claude Code | AI coding assistant | `npm install -g @anthropic-ai/claude-code` |
+| Bun 1.3.6+ | Required for agentboard only | `curl -fsSL https://bun.sh/install \| bash` |
+| ttyd | Required for ttyd only | See below |
 
 ### Installing ttyd
 
@@ -232,7 +239,7 @@ tmux attach -t claude-main
 
 ### Via Web Browser
 
-Open `http://<tailscale-ip>:7681` in any browser on your Tailscale network.
+Open `http://<tailscale-ip>:4040` (agentboard) or `http://<tailscale-ip>:7681` (ttyd) in any browser on your Tailscale network.
 
 ## Command Reference
 
@@ -347,22 +354,22 @@ The default layout creates a 3x2 grid:
 
 ### Known iOS Safari Limitations
 
-#### Touch Screen Copy Does Not Work
+#### Clipboard (Copy/Paste)
 
-iOS Safari blocks the Clipboard API for security. The copy chain (tmux -> ttyd -> xterm.js -> browser -> iOS clipboard) breaks at the browser level.
+**With agentboard**: Clipboard works. Agentboard uses multiple strategies - Clipboard API with readText fallback, a manual paste modal, and iOS native long-press text selection via xterm.js screenReaderMode. Use the on-screen Paste button or long-press to select and copy.
 
-**Workarounds:**
-1. **Manual selection**: Touch and hold text, use iOS native "Copy" from context menu
-2. **Copy mode**: `'Enter` to enter copy mode, use `v` to select, `y` to yank to tmux buffer, then `'V` to paste within terminal
-3. **View buffer**: `'Y` shows the tmux buffer in a popup - you can manually select and copy from there
-
-**For full clipboard integration**: Use SSH from a native terminal app (like Termius or Blink) instead of the web terminal.
+**With ttyd**: iOS Safari blocks the Clipboard API. The copy chain (tmux -> ttyd -> xterm.js -> browser -> iOS clipboard) breaks at the browser level. Workarounds:
+1. **Copy mode**: `'Enter` to enter copy mode, `v` to select, `y` to yank, `'V` to paste within terminal
+2. **View buffer**: `'Y` shows the tmux buffer in a popup for manual copy
+3. **SSH app**: Use Termius or Blink for full clipboard support
 
 #### iOS Spacebar Arrow Simulation Does Not Work
 
-The iOS "long-press spacebar and drag" trackpad feature does not work in web terminals. This feature only works in native iOS apps - the browser intercepts touch events.
+The iOS "long-press spacebar and drag" trackpad feature does not work in web terminals. This feature only works in native iOS apps.
 
-**Use these instead:**
+**With agentboard**: Use the on-screen DPad for arrow key navigation.
+
+**With ttyd**: Use tmux keybindings:
 - `'i` / `'o` for Up/Down (command history)
 - `'b` / `'f` for Left/Right (cursor movement)
 - `'a` / `'e` for beginning/end of line
@@ -371,10 +378,11 @@ The iOS "long-press spacebar and drag" trackpad feature does not work in web ter
 
 ```bash
 # Check service logs
-journalctl --user -u ttyd.service -f
+journalctl --user -u agentboard.service -f  # or ttyd.service
 
-# Verify ttyd is installed
-which ttyd
+# Verify installation
+ls ~/.agentboard-app  # agentboard
+which ttyd             # ttyd
 
 # Check Tailscale is connected
 tailscale status
@@ -385,7 +393,7 @@ tailscale status
 1. Verify Tailscale is running on both devices
 2. Check `tailscale status` shows both devices
 3. Try pinging your server: `ping <tailscale-ip>`
-4. Verify the service: `curl http://localhost:7681`
+4. Verify the service: `curl http://localhost:4040` (agentboard) or `curl http://localhost:7681` (ttyd)
 
 ### Session not persisting
 
@@ -417,17 +425,13 @@ Edit `~/bin/claude-session` and modify the `create_session()` function:
 
 ### Different port
 
-Edit `~/.config/systemd/user/ttyd.service`:
-
-```ini
-ExecStart=/usr/bin/ttyd --port 8080 --interface tailscale0 ...
-```
+For agentboard, edit `~/.config/systemd/user/agentboard.service` and change the `PORT=4040` environment line. For ttyd, edit `~/.config/systemd/user/ttyd.service` and change `--port 7681`.
 
 Then reload:
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user restart ttyd.service
+systemctl --user restart agentboard.service  # or ttyd.service
 ```
 
 ### Adding authentication
@@ -465,7 +469,7 @@ set -g pane-active-border-style 'fg=#32cd32'
 
 Pull requests welcome! Areas for improvement:
 
-- [ ] Mobile keyboard shortcuts
+- [x] Mobile keyboard shortcuts (solved by agentboard)
 - [ ] Alternative layouts
 - [ ] iOS Shortcuts integration
 - [ ] Android automation
@@ -477,7 +481,8 @@ MIT License - see LICENSE file.
 ## Credits
 
 Built with:
-- [ttyd](https://github.com/tsl0922/ttyd) - Web terminal
+- [agentboard](https://github.com/gbasin/agentboard) - Mobile-friendly web terminal with clipboard support
+- [ttyd](https://github.com/tsl0922/ttyd) - Lightweight web terminal
 - [tmux](https://github.com/tmux/tmux) - Terminal multiplexer
 - [Tailscale](https://tailscale.com) - Zero-config VPN
 - [Claude Code](https://claude.com/claude-code) - AI coding assistant
