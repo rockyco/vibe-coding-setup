@@ -5,8 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# Update PATH to include your bin directories and node installation
-Environment=PATH=%h/bin:%h/.nvm/versions/node/v22.17.0/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/home/amd/bin:/home/amd/.nvm/versions/node/v22.17.0/bin:/usr/local/bin:/usr/bin:/bin
+# Wait for Tailscale interface to be ready before starting
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do ip link show tailscale0 >/dev/null 2>&1 && exit 0; sleep 2; done; echo "tailscale0 not ready after 120s"; exit 1'
 ExecStart=/usr/bin/ttyd --port 7681 --interface tailscale0 bash -c 'export PATH="$HOME/bin:$PATH"; claude-session'
 Restart=on-failure
 RestartSec=5
