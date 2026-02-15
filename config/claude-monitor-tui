@@ -7,6 +7,7 @@
 # Bound to 'I in tmux.conf (opens in new window)
 
 set -e
+shopt -s extglob
 
 MONITOR_DIR="/tmp/claude-monitor"
 TRANSITIONS_LOG="$MONITOR_DIR/transitions.log"
@@ -107,28 +108,29 @@ display_name() {
     echo "$name"
 }
 
-# Status symbol with color (3 visible chars)
-status_symbol() {
+# Status symbol with color (3 visible chars) - returns string, no stdout
+_status_sym() {
     case "$1" in
-        WORKING) printf '%s' "${C_GREEN}(*)${C_NC}" ;;
-        IDLE)    printf '%s' "${C_GREY}(-)${C_NC}" ;;
-        WAITING) printf '%s' "${C_YELLOW}(!)${C_NC}" ;;
-        SHELL)   printf '%s' "${C_BLUE}(>)${C_NC}" ;;
-        *)       printf '%s' "${C_RED}(?)${C_NC}" ;;
+        WORKING) echo -n "${C_GREEN}(*)${C_NC}" ;;
+        IDLE)    echo -n "${C_GREY}(-)${C_NC}" ;;
+        WAITING) echo -n "${C_YELLOW}(!)${C_NC}" ;;
+        SHELL)   echo -n "${C_BLUE}(>)${C_NC}" ;;
+        *)       echo -n "${C_RED}(?)${C_NC}" ;;
     esac
 }
 
-# Print text padded to exact visible width (ANSI-aware)
-print_padded() {
+# Return text padded to exact visible width (ANSI-aware)
+_padded() {
     local text="$1" width="$2"
-    printf '%s' "$text"
     # Strip ANSI to measure visible length
     local visible
-    visible=$(printf '%s' "$text" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g')
+    visible="${text//$'\033['[0-9]*([;0-9])m/}"
     local vlen=${#visible}
     local padding=$((width - vlen))
     if [[ $padding -gt 0 ]]; then
-        printf "%${padding}s" ""
+        printf '%s%*s' "$text" "$padding" ""
+    else
+        printf '%s' "$text"
     fi
 }
 
@@ -152,23 +154,27 @@ cleanup() {
 }
 
 # ---------------------------------------------------------------------------
-# Rendering
+# Rendering (single-buffer: build entire screen, write once)
 # ---------------------------------------------------------------------------
 
+# Escape sequences as raw bytes (avoid spawning tput in the render loop)
+ESC_HOME=$'\033[H'      # cursor to 0,0
+ESC_EL=$'\033[K'        # clear to end of line
+ESC_HIDE=$'\033[?25l'   # hide cursor
+
 render() {
-    local rows cols main_width main_col
+    local rows cols main_width
     rows=$(tput lines)
     cols=$(tput cols)
-    main_col=$((SIDEBAR_WIDTH + 1))
-    main_width=$((cols - main_col))
+    main_width=$((cols - SIDEBAR_WIDTH - 1))
 
-    # Collect sessions
+    # --- Gather all data before drawing ---
+
     SESSIONS=()
     while IFS= read -r name; do
         [[ -n "$name" ]] && SESSIONS+=("$name")
     done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^${SESSION_PREFIX}" | sort)
 
-    # Detect statuses
     local -a statuses=() branches=() changes=() uptimes=()
     for s in "${SESSIONS[@]}"; do
         statuses+=("$(detect_status "$s")")
@@ -183,157 +189,122 @@ render() {
         [[ $SELECTED -lt 0 ]] && SELECTED=0
     fi
 
-    # === Sidebar ===
+    # Capture main panel content upfront (single tmux call)
+    local capture_lines=$((rows - 3))
+    [[ $capture_lines -lt 1 ]] && capture_lines=1
+    local capture=""
+    if [[ ${#SESSIONS[@]} -gt 0 ]]; then
+        capture=$(tmux capture-pane -t "${SESSIONS[$SELECTED]}:main.1" -p -e -S "-${capture_lines}" 2>/dev/null || echo "(unable to capture pane)")
+    fi
 
-    # Header
-    tput cup 0 0
-    print_padded "${C_BOLD} AGENTS (${#SESSIONS[@]})${C_NC}" "$SIDEBAR_WIDTH"
+    # Read activity log upfront
+    local -a activity_lines=()
+    if [[ -f "$TRANSITIONS_LOG" ]]; then
+        while IFS= read -r tline; do
+            [[ -n "$tline" ]] && activity_lines+=("$tline")
+        done < <(tail -n 50 "$TRANSITIONS_LOG" 2>/dev/null | tac)
+    fi
 
-    # Divider
-    tput cup 1 0
+    # --- Build sidebar rows into array ---
+
+    local -a sidebar=()
     local divider=""
     for ((i=0; i<SIDEBAR_WIDTH; i++)); do divider+="─"; done
-    printf '%s' "$divider"
 
-    # Agent list
-    local row=2
+    # Row 0: header
+    sidebar+=("$(_padded "${C_BOLD} AGENTS (${#SESSIONS[@]})${C_NC}" "$SIDEBAR_WIDTH")")
+    # Row 1: divider
+    sidebar+=("$divider")
+
+    # Agent rows
     for i in "${!SESSIONS[@]}"; do
-        tput cup "$row" 0
         local dname sym line
         dname=$(display_name "${SESSIONS[$i]}")
         [[ ${#dname} -gt 10 ]] && dname="${dname:0:9}."
-        sym=$(status_symbol "${statuses[$i]}")
+        sym=$(_status_sym "${statuses[$i]}")
 
         if [[ $i -eq $SELECTED ]]; then
-            line="${C_REV} > $((i+1)) $(printf '%-10s' "$dname") ${C_NC}${C_REV}$(status_symbol "${statuses[$i]}")${C_NC}"
+            line="${C_REV} > $((i+1)) $(printf '%-10s' "$dname") $(_status_sym "${statuses[$i]}")${C_NC}"
         else
             line="   $((i+1)) $(printf '%-10s' "$dname") $sym"
         fi
-        print_padded "$line" "$SIDEBAR_WIDTH"
-        row=$((row + 1))
+        sidebar+=("$(_padded "$line" "$SIDEBAR_WIDTH")")
     done
 
-    # Clear empty agent rows (up to reasonable max)
-    local agent_end=$((2 + ${#SESSIONS[@]}))
-    local activity_header=$((agent_end + 1))
-    while [[ $row -lt $activity_header ]]; do
-        tput cup "$row" 0
-        printf "%-${SIDEBAR_WIDTH}s" ""
-        row=$((row + 1))
-    done
-
+    # Blank separator row
+    sidebar+=("$(printf "%-${SIDEBAR_WIDTH}s" "")")
     # Activity header
-    tput cup "$activity_header" 0
-    print_padded "${C_BOLD} ACTIVITY${C_NC}" "$SIDEBAR_WIDTH"
+    sidebar+=("$(_padded "${C_BOLD} ACTIVITY${C_NC}" "$SIDEBAR_WIDTH")")
+    # Activity divider
+    sidebar+=("$divider")
 
-    local activity_divider_row=$((activity_header + 1))
-    tput cup "$activity_divider_row" 0
-    printf '%s' "$divider"
-
-    # Activity log entries (newest first)
-    local activity_start=$((activity_divider_row + 1))
+    # Activity entries
+    local activity_start=${#sidebar[@]}
     local max_activity=$((rows - activity_start - 1))
     [[ $max_activity -lt 0 ]] && max_activity=0
 
-    local activity_row=0
-    if [[ -f "$TRANSITIONS_LOG" ]] && [[ $max_activity -gt 0 ]]; then
-        while IFS= read -r tline; do
-            [[ -n "$tline" ]] || continue
-            tput cup $((activity_start + activity_row)) 0
-            # Parse: "HH:MM session_name STATUS"
-            local t_time t_session t_status t_dname t_sym
-            t_time=$(echo "$tline" | cut -d' ' -f1)
-            t_session=$(echo "$tline" | cut -d' ' -f2)
-            t_status=$(echo "$tline" | cut -d' ' -f3)
-            t_dname=$(display_name "$t_session")
-            [[ ${#t_dname} -gt 8 ]] && t_dname="${t_dname:0:7}."
-            t_sym=$(status_symbol "$t_status")
-            local aline=" ${t_time} $(printf '%-8s' "$t_dname") $t_sym"
-            print_padded "$aline" "$SIDEBAR_WIDTH"
-            activity_row=$((activity_row + 1))
-            [[ $activity_row -ge $max_activity ]] && break
-        done < <(tail -n "$max_activity" "$TRANSITIONS_LOG" 2>/dev/null | tac)
-    fi
-
-    # Clear remaining activity rows
-    while [[ $((activity_start + activity_row)) -lt $((rows - 1)) ]]; do
-        tput cup $((activity_start + activity_row)) 0
-        printf "%-${SIDEBAR_WIDTH}s" ""
-        activity_row=$((activity_row + 1))
+    local ai=0
+    for tline in "${activity_lines[@]}"; do
+        [[ $ai -ge $max_activity ]] && break
+        local t_time t_session t_status t_dname t_sym
+        t_time="${tline%% *}"
+        local rest="${tline#* }"
+        t_session="${rest%% *}"
+        t_status="${rest#* }"
+        t_dname=$(display_name "$t_session")
+        [[ ${#t_dname} -gt 8 ]] && t_dname="${t_dname:0:7}."
+        t_sym=$(_status_sym "$t_status")
+        sidebar+=("$(_padded " ${t_time} $(printf '%-8s' "$t_dname") $t_sym" "$SIDEBAR_WIDTH")")
+        ai=$((ai + 1))
     done
 
-    # === Vertical divider ===
-    for ((r=0; r<rows-1; r++)); do
-        tput cup "$r" "$SIDEBAR_WIDTH"
-        printf '│'
+    # Pad sidebar to fill screen height (rows - 1 for footer)
+    while [[ ${#sidebar[@]} -lt $((rows - 1)) ]]; do
+        sidebar+=("$(printf "%-${SIDEBAR_WIDTH}s" "")")
     done
 
-    # === Main panel ===
+    # --- Build main panel rows into array ---
+
+    local -a main_panel=()
     if [[ ${#SESSIONS[@]} -gt 0 ]]; then
         local sel_session="${SESSIONS[$SELECTED]}"
-        local sel_status="${statuses[$SELECTED]}"
-        local sel_branch="${branches[$SELECTED]}"
-        local sel_changes="${changes[$SELECTED]}"
-        local sel_uptime="${uptimes[$SELECTED]}"
+        local sel_sym=$(_status_sym "${statuses[$SELECTED]}")
 
-        # Header line
-        tput cup 0 "$main_col"
-        local hdr_sym
-        hdr_sym=$(status_symbol "$sel_status")
-        printf ' %s  %s  %s  %s  %s  %s' \
-            "${C_BOLD}${sel_session}${C_NC}" \
-            "$hdr_sym" \
-            "${C_DIM}${sel_branch}${C_NC}" \
-            "${C_DIM}${sel_changes}${C_NC}" \
-            "${C_DIM}${sel_uptime}${C_NC}" \
-            ""
-        tput el
+        # Header
+        main_panel+=(" ${C_BOLD}${sel_session}${C_NC}  ${sel_sym}  ${C_DIM}${branches[$SELECTED]}${C_NC}  ${C_DIM}${changes[$SELECTED]}${C_NC}  ${C_DIM}${uptimes[$SELECTED]}${C_NC}")
 
         # Separator
-        tput cup 1 "$main_col"
-        printf ' '
-        for ((i=0; i<main_width-2; i++)); do printf '─'; done
-        tput el
+        local sep=" "
+        for ((i=0; i<main_width-2; i++)); do sep+="─"; done
+        main_panel+=("$sep")
 
-        # Live terminal capture
-        local capture_lines=$((rows - 3))
-        [[ $capture_lines -lt 1 ]] && capture_lines=1
-        local capture
-        capture=$(tmux capture-pane -t "${sel_session}:main.1" -p -e -S "-${capture_lines}" 2>/dev/null || echo "(unable to capture pane)")
-
-        local line_num=0
+        # Capture lines
         while IFS= read -r cline; do
-            tput cup $((2 + line_num)) "$main_col"
-            printf ' %s' "$cline"
-            printf '%s' "${C_NC}"
-            tput el
-            line_num=$((line_num + 1))
-            [[ $line_num -ge $capture_lines ]] && break
+            main_panel+=(" ${cline}${C_NC}")
         done <<< "$capture"
-
-        # Clear remaining capture lines
-        while [[ $line_num -lt $capture_lines ]]; do
-            tput cup $((2 + line_num)) "$main_col"
-            tput el
-            line_num=$((line_num + 1))
-        done
     else
-        tput cup 0 "$main_col"
-        printf ' %s' "${C_DIM}(no claude sessions found)${C_NC}"
-        tput el
-        # Clear rest of main panel
-        for ((r=1; r<rows-1; r++)); do
-            tput cup "$r" "$main_col"
-            tput el
-        done
+        main_panel+=(" ${C_DIM}(no claude sessions found)${C_NC}")
     fi
 
-    # === Footer ===
-    tput cup $((rows - 1)) 0
+    # Pad main panel to fill screen height
+    while [[ ${#main_panel[@]} -lt $((rows - 1)) ]]; do
+        main_panel+=("")
+    done
+
+    # --- Compose full screen into single buffer ---
+
+    local buf="${ESC_HOME}${ESC_HIDE}"
+
+    for ((r=0; r<rows-1; r++)); do
+        buf+="${sidebar[$r]}│${main_panel[$r]}${ESC_EL}"$'\n'
+    done
+
+    # Footer
     local footer=" tap:select  j/k:nav  1-9:jump  Enter:switch  a:approve  q:quit"
-    printf '%s' "${C_REV}"
-    printf "%-${cols}s" "$footer"
-    printf '%s' "${C_NC}"
+    buf+="${C_REV}$(printf "%-${cols}s" "$footer")${C_NC}"
+
+    # Single atomic write
+    printf '%s' "$buf"
 }
 
 # ---------------------------------------------------------------------------
