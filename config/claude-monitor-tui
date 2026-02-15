@@ -1,0 +1,500 @@
+#!/bin/bash
+# claude-monitor-tui: Persistent full-screen monitor TUI
+# Superset-inspired layout: left sidebar (agent list + activity) + main panel (live capture)
+# Runs in a dedicated tmux window as a persistent "command center"
+#
+# Usage: claude-monitor-tui
+# Bound to 'I in tmux.conf (opens in new window)
+
+set -e
+
+MONITOR_DIR="/tmp/claude-monitor"
+TRANSITIONS_LOG="$MONITOR_DIR/transitions.log"
+SESSION_PREFIX="claude"
+STATE_DIR="$HOME/.local/state/claude-vibe"
+SIDEBAR_WIDTH=24
+REFRESH_INTERVAL=2
+
+mkdir -p "$MONITOR_DIR"
+
+# Colors
+C_GREEN=$'\033[32m'
+C_YELLOW=$'\033[1;33m'
+C_GREY=$'\033[90m'
+C_BLUE=$'\033[34m'
+C_RED=$'\033[31m'
+C_BOLD=$'\033[1m'
+C_DIM=$'\033[2m'
+C_REV=$'\033[7m'
+C_NC=$'\033[0m'
+
+# State
+SELECTED=0
+SESSIONS=()
+
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
+
+detect_status() {
+    local session="$1"
+    if command -v claude-monitor-detect &>/dev/null; then
+        claude-monitor-detect "${session}:main.1" 2>/dev/null || echo "UNKNOWN"
+    else
+        echo "UNKNOWN"
+    fi
+}
+
+get_branch() {
+    local session="$1"
+    local state_file="$STATE_DIR/${session}.state"
+    if [[ -f "$state_file" ]]; then
+        grep "^branch=" "$state_file" 2>/dev/null | cut -d= -f2-
+    else
+        local pane_path
+        pane_path=$(tmux display-message -t "${session}:main.1" -p '#{pane_current_path}' 2>/dev/null)
+        if [[ -n "$pane_path" ]] && [[ -d "$pane_path/.git" || -f "$pane_path/.git" ]]; then
+            git -C "$pane_path" branch --show-current 2>/dev/null || echo "-"
+        else
+            echo "-"
+        fi
+    fi
+}
+
+get_change_count() {
+    local session="$1"
+    local pane_path
+    pane_path=$(tmux display-message -t "${session}:main.1" -p '#{pane_current_path}' 2>/dev/null)
+    if [[ -n "$pane_path" ]] && [[ -d "$pane_path/.git" || -f "$pane_path/.git" ]]; then
+        local stat_line
+        stat_line=$(git -C "$pane_path" diff --stat HEAD 2>/dev/null | tail -1)
+        local ins del
+        ins=$(echo "$stat_line" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+')
+        del=$(echo "$stat_line" | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+')
+        echo "+${ins:-0}/-${del:-0}"
+    else
+        echo "-"
+    fi
+}
+
+get_session_uptime() {
+    local session="$1"
+    local created
+    created=$(tmux display-message -t "$session" -p '#{session_created}' 2>/dev/null)
+    if [[ -n "$created" ]]; then
+        local now elapsed
+        now=$(date +%s)
+        elapsed=$((now - created))
+        if [[ $elapsed -lt 60 ]]; then
+            echo "${elapsed}s"
+        elif [[ $elapsed -lt 3600 ]]; then
+            echo "$((elapsed / 60))m"
+        elif [[ $elapsed -lt 86400 ]]; then
+            echo "$((elapsed / 3600))h"
+        else
+            echo "$((elapsed / 86400))d"
+        fi
+    else
+        echo "-"
+    fi
+}
+
+# Strip "claude-wt-" or "claude-" prefix for compact display
+display_name() {
+    local name="$1"
+    name="${name#claude-wt-}"
+    name="${name#claude-}"
+    echo "$name"
+}
+
+# Status symbol with color (3 visible chars)
+status_symbol() {
+    case "$1" in
+        WORKING) printf '%s' "${C_GREEN}(*)${C_NC}" ;;
+        IDLE)    printf '%s' "${C_GREY}(-)${C_NC}" ;;
+        WAITING) printf '%s' "${C_YELLOW}(!)${C_NC}" ;;
+        SHELL)   printf '%s' "${C_BLUE}(>)${C_NC}" ;;
+        *)       printf '%s' "${C_RED}(?)${C_NC}" ;;
+    esac
+}
+
+# Print text padded to exact visible width (ANSI-aware)
+print_padded() {
+    local text="$1" width="$2"
+    printf '%s' "$text"
+    # Strip ANSI to measure visible length
+    local visible
+    visible=$(printf '%s' "$text" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g')
+    local vlen=${#visible}
+    local padding=$((width - vlen))
+    if [[ $padding -gt 0 ]]; then
+        printf "%${padding}s" ""
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Screen management
+# ---------------------------------------------------------------------------
+
+init_screen() {
+    tput smcup
+    tput civis
+    tput clear
+    # Enable SGR mouse tracking (click + scroll events forwarded from tmux)
+    printf '\x1b[?1000h\x1b[?1006h'
+    trap cleanup EXIT INT TERM
+}
+
+cleanup() {
+    printf '\x1b[?1000l\x1b[?1006l' 2>/dev/null
+    tput cnorm 2>/dev/null
+    tput rmcup 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# Rendering
+# ---------------------------------------------------------------------------
+
+render() {
+    local rows cols main_width main_col
+    rows=$(tput lines)
+    cols=$(tput cols)
+    main_col=$((SIDEBAR_WIDTH + 1))
+    main_width=$((cols - main_col))
+
+    # Collect sessions
+    SESSIONS=()
+    while IFS= read -r name; do
+        [[ -n "$name" ]] && SESSIONS+=("$name")
+    done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^${SESSION_PREFIX}" | sort)
+
+    # Detect statuses
+    local -a statuses=() branches=() changes=() uptimes=()
+    for s in "${SESSIONS[@]}"; do
+        statuses+=("$(detect_status "$s")")
+        branches+=("$(get_branch "$s")")
+        changes+=("$(get_change_count "$s")")
+        uptimes+=("$(get_session_uptime "$s")")
+    done
+
+    # Clamp selection
+    if [[ ${#SESSIONS[@]} -gt 0 ]]; then
+        [[ $SELECTED -ge ${#SESSIONS[@]} ]] && SELECTED=$(( ${#SESSIONS[@]} - 1 ))
+        [[ $SELECTED -lt 0 ]] && SELECTED=0
+    fi
+
+    # === Sidebar ===
+
+    # Header
+    tput cup 0 0
+    print_padded "${C_BOLD} AGENTS (${#SESSIONS[@]})${C_NC}" "$SIDEBAR_WIDTH"
+
+    # Divider
+    tput cup 1 0
+    local divider=""
+    for ((i=0; i<SIDEBAR_WIDTH; i++)); do divider+="─"; done
+    printf '%s' "$divider"
+
+    # Agent list
+    local row=2
+    for i in "${!SESSIONS[@]}"; do
+        tput cup "$row" 0
+        local dname sym line
+        dname=$(display_name "${SESSIONS[$i]}")
+        [[ ${#dname} -gt 10 ]] && dname="${dname:0:9}."
+        sym=$(status_symbol "${statuses[$i]}")
+
+        if [[ $i -eq $SELECTED ]]; then
+            line="${C_REV} > $((i+1)) $(printf '%-10s' "$dname") ${C_NC}${C_REV}$(status_symbol "${statuses[$i]}")${C_NC}"
+        else
+            line="   $((i+1)) $(printf '%-10s' "$dname") $sym"
+        fi
+        print_padded "$line" "$SIDEBAR_WIDTH"
+        row=$((row + 1))
+    done
+
+    # Clear empty agent rows (up to reasonable max)
+    local agent_end=$((2 + ${#SESSIONS[@]}))
+    local activity_header=$((agent_end + 1))
+    while [[ $row -lt $activity_header ]]; do
+        tput cup "$row" 0
+        printf "%-${SIDEBAR_WIDTH}s" ""
+        row=$((row + 1))
+    done
+
+    # Activity header
+    tput cup "$activity_header" 0
+    print_padded "${C_BOLD} ACTIVITY${C_NC}" "$SIDEBAR_WIDTH"
+
+    local activity_divider_row=$((activity_header + 1))
+    tput cup "$activity_divider_row" 0
+    printf '%s' "$divider"
+
+    # Activity log entries (newest first)
+    local activity_start=$((activity_divider_row + 1))
+    local max_activity=$((rows - activity_start - 1))
+    [[ $max_activity -lt 0 ]] && max_activity=0
+
+    local activity_row=0
+    if [[ -f "$TRANSITIONS_LOG" ]] && [[ $max_activity -gt 0 ]]; then
+        while IFS= read -r tline; do
+            [[ -n "$tline" ]] || continue
+            tput cup $((activity_start + activity_row)) 0
+            # Parse: "HH:MM session_name STATUS"
+            local t_time t_session t_status t_dname t_sym
+            t_time=$(echo "$tline" | cut -d' ' -f1)
+            t_session=$(echo "$tline" | cut -d' ' -f2)
+            t_status=$(echo "$tline" | cut -d' ' -f3)
+            t_dname=$(display_name "$t_session")
+            [[ ${#t_dname} -gt 8 ]] && t_dname="${t_dname:0:7}."
+            t_sym=$(status_symbol "$t_status")
+            local aline=" ${t_time} $(printf '%-8s' "$t_dname") $t_sym"
+            print_padded "$aline" "$SIDEBAR_WIDTH"
+            activity_row=$((activity_row + 1))
+            [[ $activity_row -ge $max_activity ]] && break
+        done < <(tail -n "$max_activity" "$TRANSITIONS_LOG" 2>/dev/null | tac)
+    fi
+
+    # Clear remaining activity rows
+    while [[ $((activity_start + activity_row)) -lt $((rows - 1)) ]]; do
+        tput cup $((activity_start + activity_row)) 0
+        printf "%-${SIDEBAR_WIDTH}s" ""
+        activity_row=$((activity_row + 1))
+    done
+
+    # === Vertical divider ===
+    for ((r=0; r<rows-1; r++)); do
+        tput cup "$r" "$SIDEBAR_WIDTH"
+        printf '│'
+    done
+
+    # === Main panel ===
+    if [[ ${#SESSIONS[@]} -gt 0 ]]; then
+        local sel_session="${SESSIONS[$SELECTED]}"
+        local sel_status="${statuses[$SELECTED]}"
+        local sel_branch="${branches[$SELECTED]}"
+        local sel_changes="${changes[$SELECTED]}"
+        local sel_uptime="${uptimes[$SELECTED]}"
+
+        # Header line
+        tput cup 0 "$main_col"
+        local hdr_sym
+        hdr_sym=$(status_symbol "$sel_status")
+        printf ' %s  %s  %s  %s  %s  %s' \
+            "${C_BOLD}${sel_session}${C_NC}" \
+            "$hdr_sym" \
+            "${C_DIM}${sel_branch}${C_NC}" \
+            "${C_DIM}${sel_changes}${C_NC}" \
+            "${C_DIM}${sel_uptime}${C_NC}" \
+            ""
+        tput el
+
+        # Separator
+        tput cup 1 "$main_col"
+        printf ' '
+        for ((i=0; i<main_width-2; i++)); do printf '─'; done
+        tput el
+
+        # Live terminal capture
+        local capture_lines=$((rows - 3))
+        [[ $capture_lines -lt 1 ]] && capture_lines=1
+        local capture
+        capture=$(tmux capture-pane -t "${sel_session}:main.1" -p -e -S "-${capture_lines}" 2>/dev/null || echo "(unable to capture pane)")
+
+        local line_num=0
+        while IFS= read -r cline; do
+            tput cup $((2 + line_num)) "$main_col"
+            printf ' %s' "$cline"
+            printf '%s' "${C_NC}"
+            tput el
+            line_num=$((line_num + 1))
+            [[ $line_num -ge $capture_lines ]] && break
+        done <<< "$capture"
+
+        # Clear remaining capture lines
+        while [[ $line_num -lt $capture_lines ]]; do
+            tput cup $((2 + line_num)) "$main_col"
+            tput el
+            line_num=$((line_num + 1))
+        done
+    else
+        tput cup 0 "$main_col"
+        printf ' %s' "${C_DIM}(no claude sessions found)${C_NC}"
+        tput el
+        # Clear rest of main panel
+        for ((r=1; r<rows-1; r++)); do
+            tput cup "$r" "$main_col"
+            tput el
+        done
+    fi
+
+    # === Footer ===
+    tput cup $((rows - 1)) 0
+    local footer=" tap:select  j/k:nav  1-9:jump  Enter:switch  a:approve  q:quit"
+    printf '%s' "${C_REV}"
+    printf "%-${cols}s" "$footer"
+    printf '%s' "${C_NC}"
+}
+
+# ---------------------------------------------------------------------------
+# Input handling
+# ---------------------------------------------------------------------------
+
+handle_key() {
+    local key="$1"
+
+    case "$key" in
+        q|Q)
+            exit 0
+            ;;
+        j)
+            SELECTED=$((SELECTED + 1))
+            ;;
+        k)
+            SELECTED=$((SELECTED - 1))
+            ;;
+        [1-9])
+            local idx=$((key - 1))
+            if [[ $idx -lt ${#SESSIONS[@]} ]]; then
+                SELECTED=$idx
+            fi
+            ;;
+        "")
+            # Enter key
+            if [[ ${#SESSIONS[@]} -gt 0 ]]; then
+                cleanup
+                tmux switch-client -t "${SESSIONS[$SELECTED]}" 2>/dev/null
+                exit 0
+            fi
+            ;;
+        a|A)
+            # Bulk approve all WAITING agents
+            for i in "${!SESSIONS[@]}"; do
+                local st
+                st=$(detect_status "${SESSIONS[$i]}")
+                if [[ "$st" == "WAITING" ]]; then
+                    tmux send-keys -t "${SESSIONS[$i]}:main.1" 'y' Enter
+                fi
+            done
+            ;;
+        r|R)
+            # Force refresh - just re-render
+            ;;
+    esac
+}
+
+# Agent list starts at row 2 (0-indexed: row 0=header, row 1=divider)
+AGENT_LIST_ROW=2
+
+handle_mouse() {
+    local btn="$1" col="$2" row="$3" event_type="$4"
+
+    # Only act on press (M), ignore release (m)
+    [[ "$event_type" == "m" ]] && return
+
+    # Convert 1-based SGR coords to 0-based screen coords
+    col=$((col - 1))
+    row=$((row - 1))
+
+    local agent_end=$((AGENT_LIST_ROW + ${#SESSIONS[@]} - 1))
+
+    case "$btn" in
+        0)
+            # Left click / tap - only act on sidebar agent list
+            if [[ $col -lt $SIDEBAR_WIDTH ]] && [[ $row -ge $AGENT_LIST_ROW ]] && [[ $row -le $agent_end ]]; then
+                local clicked_idx=$((row - AGENT_LIST_ROW))
+                if [[ $clicked_idx -eq $SELECTED ]]; then
+                    # Tap already-selected agent: switch to it
+                    cleanup
+                    tmux switch-client -t "${SESSIONS[$SELECTED]}" 2>/dev/null
+                    exit 0
+                else
+                    SELECTED=$clicked_idx
+                fi
+            fi
+            # Main panel clicks ignored (too easy to trigger from web terminal)
+            ;;
+        64)
+            # Scroll up - only in sidebar area
+            if [[ $col -lt $SIDEBAR_WIDTH ]]; then
+                SELECTED=$((SELECTED - 1))
+            fi
+            ;;
+        65)
+            # Scroll down - only in sidebar area
+            if [[ $col -lt $SIDEBAR_WIDTH ]]; then
+                SELECTED=$((SELECTED + 1))
+            fi
+            ;;
+    esac
+}
+
+# Read one input event (key or mouse). Sets INPUT_ACTION to:
+#   "key"   with INPUT_KEY containing the mapped key character
+#   "mouse" when a mouse event was handled directly
+#   ""      on timeout (no input)
+INPUT_ACTION=""
+INPUT_KEY=""
+
+read_input() {
+    INPUT_ACTION=""
+    INPUT_KEY=""
+
+    local c
+    if ! read -rsn1 -t "$REFRESH_INTERVAL" c 2>/dev/null; then
+        return  # timeout
+    fi
+
+    if [[ "$c" != $'\x1b' ]]; then
+        INPUT_ACTION="key"
+        INPUT_KEY="$c"
+        return
+    fi
+
+    # Escape sequence: read next chars to distinguish arrow vs mouse
+    local c1
+    read -rsn1 -t 0.05 c1 2>/dev/null || return
+
+    if [[ "$c1" != "[" ]]; then
+        return  # bare Esc or unknown
+    fi
+
+    local c2
+    read -rsn1 -t 0.05 c2 2>/dev/null || return
+
+    case "$c2" in
+        A) INPUT_ACTION="key"; INPUT_KEY="k" ;;  # arrow up
+        B) INPUT_ACTION="key"; INPUT_KEY="j" ;;  # arrow down
+        '<')
+            # SGR mouse: read "btn;col;rowM" or "btn;col;rowm"
+            local mouse_buf=""
+            while true; do
+                local mc
+                read -rsn1 -t 0.05 mc 2>/dev/null || break
+                if [[ "$mc" == "M" || "$mc" == "m" ]]; then
+                    local btn mcol mrow
+                    IFS=';' read -r btn mcol mrow <<< "$mouse_buf"
+                    handle_mouse "$btn" "$mcol" "$mrow" "$mc"
+                    INPUT_ACTION="mouse"
+                    return
+                fi
+                mouse_buf+="$mc"
+            done
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+init_screen
+
+while true; do
+    render
+    read_input
+    if [[ "$INPUT_ACTION" == "key" ]]; then
+        handle_key "$INPUT_KEY"
+    fi
+    # mouse events are handled inside read_input -> handle_mouse
+done

@@ -17,7 +17,9 @@ MONITOR_DIR="/tmp/claude-monitor"
 PID_FILE="$MONITOR_DIR/daemon.pid"
 LOCK_FILE="$MONITOR_DIR/daemon.lock"
 SUMMARY_FILE="$MONITOR_DIR/summary.txt"
+TRANSITIONS_LOG="$MONITOR_DIR/transitions.log"
 POLL_INTERVAL=3
+POLL_COUNT=0
 SESSION_PREFIX="claude"
 
 mkdir -p "$MONITOR_DIR"
@@ -88,6 +90,13 @@ daemon_cleanup() {
 # ---------------------------------------------------------------------------
 
 poll_cycle() {
+    # Rotate transitions log every 100 cycles (keep last 300 lines)
+    POLL_COUNT=$((POLL_COUNT + 1))
+    if [[ $((POLL_COUNT % 100)) -eq 0 ]] && [[ -f "$TRANSITIONS_LOG" ]]; then
+        tail -n 300 "$TRANSITIONS_LOG" > "${TRANSITIONS_LOG}.tmp"
+        mv "${TRANSITIONS_LOG}.tmp" "$TRANSITIONS_LOG"
+    fi
+
     local working=0 idle=0 waiting=0 shell=0 unknown=0
 
     # Enumerate all panes across all claude sessions
@@ -162,6 +171,9 @@ handle_transition() {
 
     local session_name
     session_name=$(echo "$pane_target" | cut -d: -f1)
+
+    # Log transition for TUI activity feed
+    echo "$(date +%H:%M) $session_name $to" >> "$TRANSITIONS_LOG"
 
     case "$to" in
         WAITING)
