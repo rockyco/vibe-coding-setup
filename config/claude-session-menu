@@ -1,0 +1,97 @@
+#!/bin/bash
+# claude-session-menu: Interactive tmux menu for switching between claude sessions
+# Designed for mobile-friendly tap targets via tmux display-menu
+
+set -e
+
+SESSION_PREFIX="claude"
+STATE_DIR="$HOME/.local/state/claude-vibe"
+
+# Colors for status indicators
+C_WORK='\033[32m'  # green
+C_IDLE='\033[37m'  # grey
+C_WAIT='\033[33m'  # yellow
+C_OFF='\033[90m'   # dim
+C_NC='\033[0m'
+
+get_session_branch() {
+    local session="$1"
+    local state_file="$STATE_DIR/${session}.state"
+    if [[ -f "$state_file" ]]; then
+        grep "^branch=" "$state_file" 2>/dev/null | cut -d= -f2-
+    else
+        echo "main"
+    fi
+}
+
+get_session_status_icon() {
+    local session="$1"
+    # Use monitor detect if available, otherwise check if session exists
+    if command -v claude-monitor-detect &>/dev/null; then
+        local status
+        status=$(claude-monitor-detect "${session}:main.1" 2>/dev/null || echo "UNKNOWN")
+        case "$status" in
+            WORKING)  echo "[*]" ;;
+            IDLE)     echo "[-]" ;;
+            WAITING)  echo "[!]" ;;
+            SHELL)    echo "[>]" ;;
+            *)        echo "[?]" ;;
+        esac
+    else
+        echo "[~]"
+    fi
+}
+
+build_menu() {
+    local sessions=()
+    local menu_args=()
+    local idx=1
+
+    # Collect all claude sessions
+    while IFS= read -r line; do
+        local session_name
+        session_name=$(echo "$line" | cut -d: -f1)
+        sessions+=("$session_name")
+    done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^${SESSION_PREFIX}" | sort)
+
+    if [[ ${#sessions[@]} -eq 0 ]]; then
+        tmux display-message "No claude sessions found"
+        return
+    fi
+
+    # Build tmux display-menu arguments
+    menu_args+=("Session Switcher" "" "")
+
+    local current_session
+    current_session=$(tmux display-message -p '#S')
+
+    for session in "${sessions[@]}"; do
+        local branch icon marker
+        branch=$(get_session_branch "$session")
+        icon=$(get_session_status_icon "$session")
+
+        # Mark current session
+        if [[ "$session" == "$current_session" ]]; then
+            marker=">"
+        else
+            marker=" "
+        fi
+
+        # Format: "N  > session-name  [*]  branch"
+        local label
+        label=$(printf "%s %s %-22s %s %s" "$idx" "$marker" "$session" "$icon" "$branch")
+
+        menu_args+=("$label" "$idx" "switch-client -t '$session'")
+        idx=$((idx + 1))
+    done
+
+    # Add separator and actions
+    menu_args+=("" "" "")
+    menu_args+=("New worktree (A)" "a" "command-prompt -p 'Worktree name:' \"run-shell 'claude-session -w %%'\"")
+    menu_args+=("List worktrees (W)" "w" "display-popup -E -w 80% -h 60% 'claude-session -W; read -n1 -p \"Press any key...\"'")
+    menu_args+=("Refresh (r)" "r" "display-popup -E -w 70% -h 50% '$HOME/bin/claude-session-menu'")
+
+    tmux display-menu -T "Claude Sessions" "${menu_args[@]}"
+}
+
+build_menu

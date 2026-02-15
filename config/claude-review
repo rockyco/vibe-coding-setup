@@ -1,0 +1,508 @@
+#!/bin/bash
+# claude-review: Review and merge workflow for multi-agent worktree sessions
+#
+# Usage:
+#   claude-review --list              List worktrees with pending changes
+#   claude-review --summary           Quick summary for current pane's repo
+#   claude-review --diff              Full diff vs main branch
+#   claude-review --browse            File-by-file diff navigation
+#   claude-review --merge-interactive Interactive merge strategy menu
+#
+# Keybindings in tmux.conf:
+#   'R  --list
+#   'G  --summary
+#   'E  --diff
+#   'B  --browse
+#   'O  --merge-interactive
+
+set -e
+
+STATE_DIR="$HOME/.local/state/claude-vibe"
+WORKTREE_PREFIX="claude-wt"
+
+# Colors
+C_GREEN='\033[32m'
+C_YELLOW='\033[33m'
+C_RED='\033[31m'
+C_BLUE='\033[34m'
+C_BOLD='\033[1m'
+C_DIM='\033[2m'
+C_NC='\033[0m'
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+get_main_branch() {
+    local repo_dir="$1"
+    local main
+    main=$(git -C "$repo_dir" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
+    if [[ -z "$main" ]]; then
+        # Fallback: check common names
+        for candidate in main master; do
+            if git -C "$repo_dir" rev-parse --verify "$candidate" &>/dev/null; then
+                main="$candidate"
+                break
+            fi
+        done
+    fi
+    echo "${main:-main}"
+}
+
+get_merge_base() {
+    local repo_dir="$1"
+    local main_branch="$2"
+    git -C "$repo_dir" merge-base HEAD "$main_branch" 2>/dev/null
+}
+
+ensure_in_git_repo() {
+    if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+        echo -e "${C_RED}Error: Not inside a git repository${C_NC}"
+        exit 1
+    fi
+}
+
+press_any_key() {
+    echo ""
+    read -n 1 -s -r -p "Press any key to continue..."
+    echo ""
+}
+
+# ---------------------------------------------------------------------------
+# --list: Review dashboard
+# ---------------------------------------------------------------------------
+
+mode_list() {
+    echo ""
+    echo -e " ${C_BOLD}REVIEW DASHBOARD${C_NC}"
+    echo -e " $(printf '%0.s-' {1..60})"
+    echo ""
+
+    local found=0
+    for state_file in "$STATE_DIR"/${WORKTREE_PREFIX}-*.state; do
+        [[ -f "$state_file" ]] || continue
+
+        local session branch worktree project
+        session=$(grep "^session=" "$state_file" | cut -d= -f2-)
+        branch=$(grep "^branch=" "$state_file" | cut -d= -f2-)
+        worktree=$(grep "^worktree=" "$state_file" | cut -d= -f2-)
+        project=$(grep "^project=" "$state_file" | cut -d= -f2-)
+
+        [[ -d "$worktree" ]] || continue
+
+        local main_branch merge_base
+        main_branch=$(get_main_branch "$project")
+        merge_base=$(get_merge_base "$worktree" "$main_branch")
+
+        if [[ -z "$merge_base" ]]; then
+            continue
+        fi
+
+        # Stats
+        local commit_count files_changed insertions deletions
+        commit_count=$(git -C "$worktree" rev-list --count "${merge_base}..HEAD" 2>/dev/null || echo "0")
+        local diffstat
+        diffstat=$(git -C "$worktree" diff --stat "$merge_base" 2>/dev/null | tail -1)
+        files_changed=$(echo "$diffstat" | grep -oE '[0-9]+ file' | grep -oE '[0-9]+' || echo "0")
+        insertions=$(echo "$diffstat" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo "0")
+        deletions=$(echo "$diffstat" | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo "0")
+
+        # Uncommitted changes
+        local uncommitted=""
+        if [[ -n "$(git -C "$worktree" status --porcelain 2>/dev/null)" ]]; then
+            uncommitted="${C_YELLOW} [uncommitted]${C_NC}"
+        fi
+
+        # Session status
+        local status_indicator=""
+        if tmux has-session -t "$session" 2>/dev/null; then
+            status_indicator="${C_GREEN}running${C_NC}"
+        else
+            status_indicator="${C_DIM}stopped${C_NC}"
+        fi
+
+        found=1
+        echo -e " ${C_BOLD}$session${C_NC}  ($status_indicator)$uncommitted"
+        echo -e "   Branch: $branch"
+        echo -e "   Path:   $worktree"
+        echo -e "   ${commit_count} commit(s), ${files_changed} file(s), ${C_GREEN}+${insertions}${C_NC}/${C_RED}-${deletions}${C_NC}"
+        echo ""
+    done
+
+    if [[ $found -eq 0 ]]; then
+        echo "  No worktree sessions with changes found."
+        echo ""
+        echo "  Create a worktree: claude-session -w <name>"
+    fi
+
+    echo -e " $(printf '%0.s-' {1..60})"
+    echo ""
+    echo " Next steps:"
+    echo "   'G  Change summary (from worktree session)"
+    echo "   'E  Full diff"
+    echo "   'B  File-by-file browser"
+    echo "   'O  Merge workflow"
+    echo ""
+
+    press_any_key
+}
+
+# ---------------------------------------------------------------------------
+# --summary: Quick change summary for current repo
+# ---------------------------------------------------------------------------
+
+mode_summary() {
+    ensure_in_git_repo
+
+    local main_branch merge_base
+    main_branch=$(get_main_branch ".")
+    merge_base=$(get_merge_base "." "$main_branch")
+
+    if [[ -z "$merge_base" ]]; then
+        echo -e "${C_YELLOW}Cannot determine merge base with $main_branch${C_NC}"
+        press_any_key
+        return
+    fi
+
+    local current_branch
+    current_branch=$(git branch --show-current 2>/dev/null || echo "detached")
+
+    echo ""
+    echo -e " ${C_BOLD}CHANGE SUMMARY${C_NC}  ($current_branch vs $main_branch)"
+    echo -e " $(printf '%0.s-' {1..60})"
+    echo ""
+
+    # Stats line
+    local diffstat
+    diffstat=$(git diff --stat "$merge_base" 2>/dev/null | tail -1)
+    echo -e " Stats: $diffstat"
+    echo ""
+
+    # Commit log
+    local commit_count
+    commit_count=$(git rev-list --count "${merge_base}..HEAD" 2>/dev/null || echo "0")
+    echo -e " ${C_BOLD}Commits ($commit_count):${C_NC}"
+    git log --oneline "${merge_base}..HEAD" 2>/dev/null | while IFS= read -r line; do
+        echo "   $line"
+    done
+    echo ""
+
+    # Modified files by status
+    echo -e " ${C_BOLD}Files:${C_NC}"
+    git diff --name-status "$merge_base" 2>/dev/null | while IFS=$'\t' read -r status file; do
+        case "$status" in
+            A)  echo -e "   ${C_GREEN}[new]${C_NC} $file" ;;
+            M)  echo -e "   ${C_BLUE}[mod]${C_NC} $file" ;;
+            D)  echo -e "   ${C_RED}[del]${C_NC} $file" ;;
+            R*) echo -e "   ${C_YELLOW}[ren]${C_NC} $file" ;;
+            *)  echo "   [$status] $file" ;;
+        esac
+    done
+    echo ""
+
+    # Uncommitted changes
+    local porcelain
+    porcelain=$(git status --porcelain 2>/dev/null)
+    if [[ -n "$porcelain" ]]; then
+        echo -e " ${C_YELLOW}${C_BOLD}Uncommitted:${C_NC}"
+        echo "$porcelain" | while IFS= read -r line; do
+            echo "   $line"
+        done
+        echo ""
+    fi
+
+    press_any_key
+}
+
+# ---------------------------------------------------------------------------
+# --diff: Full diff vs main branch
+# ---------------------------------------------------------------------------
+
+mode_diff() {
+    ensure_in_git_repo
+
+    local main_branch merge_base
+    main_branch=$(get_main_branch ".")
+    merge_base=$(get_merge_base "." "$main_branch")
+
+    if [[ -z "$merge_base" ]]; then
+        echo -e "${C_YELLOW}Cannot determine merge base with $main_branch${C_NC}"
+        press_any_key
+        return
+    fi
+
+    # Use delta if available, otherwise colored git diff
+    if command -v delta &>/dev/null; then
+        git diff "$merge_base" | delta --paging always
+    else
+        git diff --color "$merge_base" | less -R
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# --browse: File-by-file diff navigation
+# ---------------------------------------------------------------------------
+
+mode_browse() {
+    ensure_in_git_repo
+
+    local main_branch merge_base
+    main_branch=$(get_main_branch ".")
+    merge_base=$(get_merge_base "." "$main_branch")
+
+    if [[ -z "$merge_base" ]]; then
+        echo -e "${C_YELLOW}Cannot determine merge base with $main_branch${C_NC}"
+        press_any_key
+        return
+    fi
+
+    # Get list of changed files
+    local files=()
+    while IFS= read -r file; do
+        [[ -n "$file" ]] && files+=("$file")
+    done < <(git diff --name-only "$merge_base" 2>/dev/null)
+
+    if [[ ${#files[@]} -eq 0 ]]; then
+        echo "No changed files."
+        press_any_key
+        return
+    fi
+
+    local total=${#files[@]}
+    local idx=0
+    local word_diff=false
+
+    while true; do
+        local file="${files[$idx]}"
+        local file_status
+        file_status=$(git diff --name-status "$merge_base" -- "$file" 2>/dev/null | cut -f1)
+
+        local status_label
+        case "$file_status" in
+            A)  status_label="${C_GREEN}Added${C_NC}" ;;
+            M)  status_label="${C_BLUE}Modified${C_NC}" ;;
+            D)  status_label="${C_RED}Deleted${C_NC}" ;;
+            *)  status_label="$file_status" ;;
+        esac
+
+        clear
+        echo -e " ${C_BOLD}FILE $((idx + 1))/$total${C_NC}  $status_label"
+        echo -e " ${C_DIM}$file${C_NC}"
+        local diff_mode=""
+        if $word_diff; then
+            diff_mode=" ${C_YELLOW}[word-diff]${C_NC}"
+        fi
+        echo -e " n:next  p:prev  s:toggle-word-diff  q:quit$diff_mode"
+        echo -e " $(printf '%0.s-' {1..60})"
+        echo ""
+
+        # Show the diff for this file
+        local diff_args=("$merge_base" "--" "$file")
+        if $word_diff; then
+            diff_args=("--word-diff" "${diff_args[@]}")
+        fi
+
+        if command -v delta &>/dev/null; then
+            git diff "${diff_args[@]}" | delta --paging always
+        else
+            git diff --color "${diff_args[@]}" | less -R
+        fi
+
+        # After pager exits, ask for navigation
+        echo ""
+        read -n 1 -s -r -p " [n]ext [p]rev [s]word-diff [q]uit: " nav
+        echo ""
+
+        case "$nav" in
+            n|N)
+                if [[ $idx -lt $((total - 1)) ]]; then
+                    idx=$((idx + 1))
+                else
+                    echo " (last file)"
+                    sleep 0.5
+                fi
+                ;;
+            p|P)
+                if [[ $idx -gt 0 ]]; then
+                    idx=$((idx - 1))
+                else
+                    echo " (first file)"
+                    sleep 0.5
+                fi
+                ;;
+            s|S)
+                word_diff=$( $word_diff && echo false || echo true )
+                ;;
+            q|Q)
+                return
+                ;;
+        esac
+    done
+}
+
+# ---------------------------------------------------------------------------
+# --merge-interactive: Interactive merge strategy menu
+# ---------------------------------------------------------------------------
+
+mode_merge_interactive() {
+    ensure_in_git_repo
+
+    local main_branch current_branch
+    main_branch=$(get_main_branch ".")
+    current_branch=$(git branch --show-current 2>/dev/null)
+
+    if [[ "$current_branch" == "$main_branch" ]]; then
+        echo -e "${C_YELLOW}Already on $main_branch - switch to a feature branch first${C_NC}"
+        press_any_key
+        return
+    fi
+
+    # Safety check: uncommitted changes
+    if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+        echo -e "${C_RED}Uncommitted changes detected. Commit or stash before merging.${C_NC}"
+        echo ""
+        git status --short
+        press_any_key
+        return
+    fi
+
+    local merge_base
+    merge_base=$(get_merge_base "." "$main_branch")
+
+    local commit_count
+    commit_count=$(git rev-list --count "${merge_base}..HEAD" 2>/dev/null || echo "0")
+    local diffstat
+    diffstat=$(git diff --stat "$merge_base" 2>/dev/null | tail -1)
+
+    echo ""
+    echo -e " ${C_BOLD}MERGE WORKFLOW${C_NC}"
+    echo -e " $(printf '%0.s-' {1..50})"
+    echo -e " Branch:  ${C_BOLD}$current_branch${C_NC} -> $main_branch"
+    echo -e " Commits: $commit_count"
+    echo -e " Changes: $diffstat"
+    echo ""
+    echo " Choose merge strategy:"
+    echo ""
+    echo "   1) merge    - Standard merge commit"
+    echo "   2) rebase   - Rebase onto $main_branch, then fast-forward"
+    echo "   3) squash   - Squash all commits into one"
+    echo "   q) cancel"
+    echo ""
+    read -n 1 -s -r -p " Strategy [1/2/3/q]: " choice
+    echo ""
+
+    case "$choice" in
+        1)
+            echo ""
+            read -n 1 -r -p " Merge $current_branch into $main_branch? [y/N] " confirm
+            echo ""
+            if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                echo " Cancelled."
+                press_any_key
+                return
+            fi
+            git checkout "$main_branch"
+            git merge "$current_branch"
+            echo -e " ${C_GREEN}Merged successfully${C_NC}"
+            ;;
+        2)
+            echo ""
+            read -n 1 -r -p " Rebase $current_branch onto $main_branch? [y/N] " confirm
+            echo ""
+            if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                echo " Cancelled."
+                press_any_key
+                return
+            fi
+            git rebase "$main_branch"
+            git checkout "$main_branch"
+            git merge --ff-only "$current_branch"
+            echo -e " ${C_GREEN}Rebased and fast-forwarded successfully${C_NC}"
+            ;;
+        3)
+            echo ""
+            read -n 1 -r -p " Squash-merge $current_branch into $main_branch? [y/N] " confirm
+            echo ""
+            if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                echo " Cancelled."
+                press_any_key
+                return
+            fi
+            git checkout "$main_branch"
+            git merge --squash "$current_branch"
+            # Auto-generate commit message from branch name
+            local msg="Squash merge: $current_branch"
+            git commit -m "$msg"
+            echo -e " ${C_GREEN}Squash-merged successfully${C_NC}"
+            ;;
+        q|Q)
+            echo " Cancelled."
+            press_any_key
+            return
+            ;;
+        *)
+            echo " Invalid choice."
+            press_any_key
+            return
+            ;;
+    esac
+
+    # Offer cleanup
+    echo ""
+    read -n 1 -r -p " Delete branch $current_branch? [y/N] " cleanup
+    echo ""
+    if [[ "$cleanup" =~ ^[Yy]$ ]]; then
+        git branch -d "$current_branch" 2>/dev/null && \
+            echo -e " ${C_GREEN}Branch deleted${C_NC}" || \
+            echo -e " ${C_YELLOW}Could not delete branch (may have unmerged commits)${C_NC}"
+    fi
+
+    # Offer worktree cleanup if this is a worktree
+    if [[ -n "${CLAUDE_VIBE_WORKTREE:-}" ]]; then
+        echo ""
+        read -n 1 -r -p " Remove this worktree and switch to main session? [y/N] " wt_cleanup
+        echo ""
+        if [[ "$wt_cleanup" =~ ^[Yy]$ ]]; then
+            local session_name
+            session_name=$(tmux display-message -p '#S' 2>/dev/null)
+            local wt_name="${session_name#claude-wt-}"
+            echo " Run: claude-session -f $wt_name"
+            echo " (Cannot remove current worktree from within it)"
+        fi
+    fi
+
+    press_any_key
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+case "${1:-}" in
+    --list|-l)
+        mode_list
+        ;;
+    --summary|-s)
+        mode_summary
+        ;;
+    --diff|-d)
+        mode_diff
+        ;;
+    --browse|-b)
+        mode_browse
+        ;;
+    --merge-interactive|-m)
+        mode_merge_interactive
+        ;;
+    *)
+        echo "Usage: claude-review {--list|--summary|--diff|--browse|--merge-interactive}"
+        echo ""
+        echo "Modes:"
+        echo "  --list              Review dashboard (all worktrees)"
+        echo "  --summary           Change summary (current repo)"
+        echo "  --diff              Full diff vs main"
+        echo "  --browse            File-by-file navigation"
+        echo "  --merge-interactive Merge strategy menu"
+        exit 1
+        ;;
+esac

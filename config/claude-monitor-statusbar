@@ -1,0 +1,48 @@
+#!/bin/bash
+# claude-monitor-statusbar: Render session status counts for tmux status bar
+# Output format: [2*|1-|1!] with colors
+# Called by tmux status-right every status-interval seconds
+
+SUMMARY_FILE="/tmp/claude-monitor/summary.txt"
+
+if [[ ! -f "$SUMMARY_FILE" ]]; then
+    # No daemon running - show nothing
+    exit 0
+fi
+
+# Read summary: working:idle:waiting
+IFS=: read -r working idle waiting < "$SUMMARY_FILE" 2>/dev/null
+
+working="${working:-0}"
+idle="${idle:-0}"
+waiting="${waiting:-0}"
+
+# Only show if there are sessions
+total=$((working + idle + waiting))
+if [[ $total -eq 0 ]]; then
+    exit 0
+fi
+
+# Build status string with tmux color codes
+parts=()
+
+if [[ $working -gt 0 ]]; then
+    parts+=("#[fg=green]${working}*#[default]")
+fi
+if [[ $idle -gt 0 ]]; then
+    parts+=("#[fg=colour245]${idle}-#[default]")
+fi
+if [[ $waiting -gt 0 ]]; then
+    parts+=("#[fg=yellow,bold]${waiting}!#[default]")
+fi
+
+# Join with pipe separators
+result=""
+for i in "${!parts[@]}"; do
+    if [[ $i -gt 0 ]]; then
+        result="${result}|"
+    fi
+    result="${result}${parts[$i]}"
+done
+
+echo "[${result}]"

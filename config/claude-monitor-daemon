@@ -1,0 +1,211 @@
+#!/bin/bash
+# claude-monitor-daemon: Background polling daemon for Claude Code session monitoring
+#
+# Usage:
+#   claude-monitor-daemon start     Start the daemon (if not already running)
+#   claude-monitor-daemon stop      Stop the daemon
+#   claude-monitor-daemon status    Show daemon status
+#   claude-monitor-daemon once      Run one poll cycle (for debugging)
+#
+# The daemon polls every 3 seconds, detects status of all claude panes,
+# tracks state transitions, and sends notifications (bell + tmux message)
+# when agents need attention.
+
+set -e
+
+MONITOR_DIR="/tmp/claude-monitor"
+PID_FILE="$MONITOR_DIR/daemon.pid"
+LOCK_FILE="$MONITOR_DIR/daemon.lock"
+SUMMARY_FILE="$MONITOR_DIR/summary.txt"
+POLL_INTERVAL=3
+SESSION_PREFIX="claude"
+
+mkdir -p "$MONITOR_DIR"
+
+# ---------------------------------------------------------------------------
+# Lifecycle management
+# ---------------------------------------------------------------------------
+
+daemon_start() {
+    # Single-instance guard via flock
+    exec 9>"$LOCK_FILE"
+    if ! flock -n 9; then
+        echo "Daemon already running (lock held)"
+        return 0
+    fi
+
+    echo $$ > "$PID_FILE"
+    echo "Monitor daemon started (PID $$)"
+
+    # Trap for clean shutdown
+    trap daemon_cleanup EXIT INT TERM
+
+    # Main polling loop
+    while true; do
+        poll_cycle
+        sleep "$POLL_INTERVAL"
+    done
+}
+
+daemon_stop() {
+    if [[ -f "$PID_FILE" ]]; then
+        local pid
+        pid=$(cat "$PID_FILE" 2>/dev/null)
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            kill "$pid"
+            echo "Daemon stopped (PID $pid)"
+        else
+            echo "Daemon not running (stale PID file)"
+        fi
+        rm -f "$PID_FILE"
+    else
+        echo "Daemon not running (no PID file)"
+    fi
+}
+
+daemon_status() {
+    if [[ -f "$PID_FILE" ]]; then
+        local pid
+        pid=$(cat "$PID_FILE" 2>/dev/null)
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            echo "Daemon running (PID $pid)"
+            if [[ -f "$SUMMARY_FILE" ]]; then
+                echo "Last summary: $(cat "$SUMMARY_FILE")"
+            fi
+            return 0
+        fi
+    fi
+    echo "Daemon not running"
+    return 1
+}
+
+daemon_cleanup() {
+    rm -f "$PID_FILE" "$LOCK_FILE"
+}
+
+# ---------------------------------------------------------------------------
+# Polling
+# ---------------------------------------------------------------------------
+
+poll_cycle() {
+    local working=0 idle=0 waiting=0 shell=0 unknown=0
+
+    # Enumerate all panes across all claude sessions
+    while IFS= read -r pane_target; do
+        [[ -n "$pane_target" ]] || continue
+
+        # Get current status
+        local status
+        status=$(claude-monitor-detect "$pane_target" 2>/dev/null || echo "UNKNOWN")
+
+        # Track by status
+        case "$status" in
+            WORKING) working=$((working + 1)) ;;
+            IDLE)    idle=$((idle + 1)) ;;
+            WAITING) waiting=$((waiting + 1)) ;;
+            SHELL)   shell=$((shell + 1)) ;;
+            *)       unknown=$((unknown + 1)) ;;
+        esac
+
+        # State transition tracking
+        local state_file="$MONITOR_DIR/state_$(echo "$pane_target" | tr ':.' '_')"
+        local prev_status=""
+        if [[ -f "$state_file" ]]; then
+            prev_status=$(cat "$state_file")
+        fi
+
+        # Write current status
+        echo "$status" > "$state_file"
+
+        # Handle transitions
+        if [[ "$prev_status" != "$status" ]] && [[ -n "$prev_status" ]]; then
+            handle_transition "$pane_target" "$prev_status" "$status"
+        fi
+
+    done < <(enumerate_claude_panes)
+
+    # Write summary for status bar
+    # Only count primary panes (pane 1 of each session) for the summary
+    local summary_working=0 summary_idle=0 summary_waiting=0
+    while IFS= read -r session_name; do
+        [[ -n "$session_name" ]] || continue
+        local pane1_target="${session_name}:main.1"
+        local pane1_status
+        pane1_status=$(claude-monitor-detect "$pane1_target" 2>/dev/null || echo "UNKNOWN")
+        case "$pane1_status" in
+            WORKING) summary_working=$((summary_working + 1)) ;;
+            IDLE)    summary_idle=$((summary_idle + 1)) ;;
+            WAITING) summary_waiting=$((summary_waiting + 1)) ;;
+        esac
+    done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^${SESSION_PREFIX}")
+
+    echo "${summary_working}:${summary_idle}:${summary_waiting}" > "$SUMMARY_FILE"
+}
+
+enumerate_claude_panes() {
+    # List pane 1 (Claude Code pane) of each claude session
+    # Only monitor the primary pane where Claude runs
+    tmux list-sessions -F '#{session_name}' 2>/dev/null | \
+        grep "^${SESSION_PREFIX}" | \
+        while IFS= read -r session; do
+            # Check if pane 1 exists
+            if tmux has-session -t "$session" 2>/dev/null; then
+                echo "${session}:main.1"
+            fi
+        done
+}
+
+handle_transition() {
+    local pane_target="$1"
+    local from="$2"
+    local to="$3"
+
+    local session_name
+    session_name=$(echo "$pane_target" | cut -d: -f1)
+
+    case "$to" in
+        WAITING)
+            # Agent needs attention - ring bell and show message
+            # BEL character propagates through web terminal to phone notifications
+            printf '\a'
+            tmux display-message -d 5000 "  [$session_name] needs input  " 2>/dev/null || true
+            ;;
+        IDLE)
+            if [[ "$from" == "WORKING" ]]; then
+                # Agent finished working
+                tmux display-message -d 3000 "  [$session_name] finished  " 2>/dev/null || true
+            fi
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+case "${1:-}" in
+    start)
+        # Run in background if not already backgrounded
+        if [[ "${2:-}" != "--foreground" ]]; then
+            nohup "$0" start --foreground >/dev/null 2>&1 &
+            disown
+            echo "Monitor daemon starting in background (PID $!)"
+        else
+            daemon_start
+        fi
+        ;;
+    stop)
+        daemon_stop
+        ;;
+    status)
+        daemon_status
+        ;;
+    once)
+        poll_cycle
+        echo "Poll complete. Summary: $(cat "$SUMMARY_FILE" 2>/dev/null || echo 'none')"
+        ;;
+    *)
+        echo "Usage: claude-monitor-daemon {start|stop|status|once}"
+        exit 1
+        ;;
+esac

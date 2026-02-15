@@ -1,0 +1,195 @@
+#!/bin/bash
+# claude-monitor-dashboard: Interactive session monitor popup
+# Designed for 80-column mobile landscape display
+# Bound to 'M in tmux.conf
+#
+# Features:
+#   - Live session status with auto-refresh (3s)
+#   - Number keys to jump to sessions
+#   - 'a' to bulk-approve all WAITING panes
+#   - 'r' to force refresh
+
+set -e
+
+SESSION_PREFIX="claude"
+STATE_DIR="$HOME/.local/state/claude-vibe"
+
+# Colors
+C_GREEN='\033[32m'
+C_YELLOW='\033[33m'
+C_GREY='\033[90m'
+C_BLUE='\033[34m'
+C_RED='\033[31m'
+C_BOLD='\033[1m'
+C_NC='\033[0m'
+
+get_branch() {
+    local session="$1"
+    local state_file="$STATE_DIR/${session}.state"
+    if [[ -f "$state_file" ]]; then
+        grep "^branch=" "$state_file" 2>/dev/null | cut -d= -f2-
+    else
+        # Try to detect from pane working directory
+        local pane_path
+        pane_path=$(tmux display-message -t "${session}:main.1" -p '#{pane_current_path}' 2>/dev/null)
+        if [[ -n "$pane_path" ]] && [[ -d "$pane_path/.git" || -f "$pane_path/.git" ]]; then
+            git -C "$pane_path" branch --show-current 2>/dev/null || echo "-"
+        else
+            echo "-"
+        fi
+    fi
+}
+
+get_change_count() {
+    local session="$1"
+    local pane_path
+    pane_path=$(tmux display-message -t "${session}:main.1" -p '#{pane_current_path}' 2>/dev/null)
+    if [[ -n "$pane_path" ]] && [[ -d "$pane_path/.git" || -f "$pane_path/.git" ]]; then
+        local count
+        count=$(git -C "$pane_path" diff --stat HEAD 2>/dev/null | tail -1 | grep -oE '[0-9]+ file' | grep -oE '[0-9]+')
+        echo "${count:-0}"
+    else
+        echo "-"
+    fi
+}
+
+get_session_uptime() {
+    local session="$1"
+    local created
+    created=$(tmux display-message -t "$session" -p '#{session_created}' 2>/dev/null)
+    if [[ -n "$created" ]]; then
+        local now elapsed
+        now=$(date +%s)
+        elapsed=$((now - created))
+        if [[ $elapsed -lt 60 ]]; then
+            echo "${elapsed}s"
+        elif [[ $elapsed -lt 3600 ]]; then
+            echo "$((elapsed / 60))m"
+        elif [[ $elapsed -lt 86400 ]]; then
+            echo "$((elapsed / 3600))h"
+        else
+            echo "$((elapsed / 86400))d"
+        fi
+    else
+        echo "-"
+    fi
+}
+
+detect_status() {
+    local session="$1"
+    if command -v claude-monitor-detect &>/dev/null; then
+        claude-monitor-detect "${session}:main.1" 2>/dev/null || echo "UNKNOWN"
+    else
+        echo "UNKNOWN"
+    fi
+}
+
+format_status() {
+    local status="$1"
+    case "$status" in
+        WORKING) echo -e "${C_GREEN}[*]${C_NC}" ;;
+        IDLE)    echo -e "${C_GREY}[-]${C_NC}" ;;
+        WAITING) echo -e "${C_YELLOW}[!]${C_NC}" ;;
+        SHELL)   echo -e "${C_BLUE}[>]${C_NC}" ;;
+        *)       echo -e "${C_RED}[?]${C_NC}" ;;
+    esac
+}
+
+render() {
+    clear
+
+    local sessions=()
+    while IFS= read -r name; do
+        [[ -n "$name" ]] && sessions+=("$name")
+    done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^${SESSION_PREFIX}" | sort)
+
+    local now
+    now=$(date +%H:%M:%S)
+
+    # Header
+    printf " ${C_BOLD}SESSION MONITOR${C_NC}%*s\n" $((80 - 17)) "$now"
+    printf " %s\n" "$(printf '%0.s-' {1..54})"
+    printf " ${C_BOLD}%-3s %-22s %-5s %-14s %4s %5s${C_NC}\n" "#" "Session" "Stat" "Branch" "Chg" "Time"
+    printf " %s\n" "$(printf '%0.s-' {1..54})"
+
+    if [[ ${#sessions[@]} -eq 0 ]]; then
+        echo ""
+        echo "  (no claude sessions found)"
+        echo ""
+    else
+        local idx=1
+        for session in "${sessions[@]}"; do
+            local status branch changes uptime status_fmt
+
+            status=$(detect_status "$session")
+            status_fmt=$(format_status "$status")
+            branch=$(get_branch "$session")
+            changes=$(get_change_count "$session")
+            uptime=$(get_session_uptime "$session")
+
+            # Truncate branch to 14 chars
+            if [[ ${#branch} -gt 14 ]]; then
+                branch="${branch:0:13}."
+            fi
+
+            printf " %-3s %-22s %b %-14s %4s %5s\n" \
+                "$idx" "$session" "$status_fmt" "$branch" "$changes" "$uptime"
+            idx=$((idx + 1))
+        done
+    fi
+
+    printf " %s\n" "$(printf '%0.s-' {1..54})"
+    echo -e " ${C_GREEN}[*]${C_NC}=working  ${C_GREY}[-]${C_NC}=idle  ${C_YELLOW}[!]${C_NC}=waiting  ${C_BLUE}[>]${C_NC}=shell"
+    echo ""
+    echo " q:quit  r:refresh  1-9:jump  a:approve-all-waiting"
+
+    # Store sessions for key handling
+    CURRENT_SESSIONS=("${sessions[@]}")
+}
+
+handle_input() {
+    local key="$1"
+
+    case "$key" in
+        q|Q)
+            exit 0
+            ;;
+        r|R)
+            return 0  # Just re-render
+            ;;
+        a|A)
+            # Bulk approve: send 'y' + Enter to all WAITING panes
+            local approved=0
+            for session in "${CURRENT_SESSIONS[@]}"; do
+                local status
+                status=$(detect_status "$session")
+                if [[ "$status" == "WAITING" ]]; then
+                    tmux send-keys -t "${session}:main.1" 'y' Enter
+                    approved=$((approved + 1))
+                fi
+            done
+            if [[ $approved -gt 0 ]]; then
+                tmux display-message "Approved $approved waiting session(s)"
+            fi
+            ;;
+        [1-9])
+            local idx=$((key - 1))
+            if [[ $idx -lt ${#CURRENT_SESSIONS[@]} ]]; then
+                local target="${CURRENT_SESSIONS[$idx]}"
+                tmux switch-client -t "$target"
+                exit 0
+            fi
+            ;;
+    esac
+}
+
+# Store sessions globally for key handler
+CURRENT_SESSIONS=()
+
+# Main loop: render + wait for input with auto-refresh
+while true; do
+    render
+    if read -t 3 -n 1 key 2>/dev/null; then
+        handle_input "$key"
+    fi
+done

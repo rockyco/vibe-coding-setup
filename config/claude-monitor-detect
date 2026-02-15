@@ -1,0 +1,72 @@
+#!/bin/bash
+# claude-monitor-detect: Detect Claude Code status from tmux pane content
+#
+# Usage:
+#   claude-monitor-detect <session:window.pane>
+#
+# Output: one of WAITING, WORKING, IDLE, SHELL, UNKNOWN
+#
+# Detection method: captures last 15 lines of pane via tmux capture-pane,
+# strips ANSI codes, and matches patterns in priority order.
+
+set -e
+
+PANE_TARGET="${1:?Usage: claude-monitor-detect <session:window.pane>}"
+
+# Capture last 15 lines from the pane, strip ANSI escape codes
+capture=$(tmux capture-pane -t "$PANE_TARGET" -p -S -15 2>/dev/null | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\x1b\][^\x07]*\x07//g')
+
+if [[ -z "$capture" ]]; then
+    echo "UNKNOWN"
+    exit 0
+fi
+
+# Priority 1: WAITING (needs user action)
+# These patterns indicate Claude is blocked waiting for user input
+if echo "$capture" | grep -qiE \
+    '(Do you want to proceed|accept edits on|\[y\/n\]|\[Y\/n\]|approve|allow|permit|Would you like|Press Enter to|yes\/no|confirm)'; then
+    echo "WAITING"
+    exit 0
+fi
+
+# Priority 2: WORKING (actively generating or running tools)
+# Spinner lines start with a bullet/asterisk and a verb (present participle)
+# Also detect tool execution and agent activity
+if echo "$capture" | grep -qE \
+    '(^[*] [A-Z][a-z]+ing |Running [0-9]+ agent|Analyzing|Generating|Searching|Reading|Writing|Editing|Creating|Updating|Executing|Processing|Fetching|Building|Compiling|Installing|Downloading|Uploading|Scanning|Indexing)'; then
+    echo "WORKING"
+    exit 0
+fi
+
+# Also check for active tool call patterns (indented output with progress indicators)
+if echo "$capture" | grep -qE '(^  [A-Z][a-z]+ \(|tokens remaining|Cost:|Input:|Output:.*in progress)'; then
+    echo "WORKING"
+    exit 0
+fi
+
+# Priority 3: IDLE (at Claude prompt, ready for input)
+# The Claude Code prompt shows a horizontal rule followed by prompt
+# Check for the prompt pattern: path followed by cursor
+if echo "$capture" | grep -qE '(^[─]{3,}|^[-]{3,})' && \
+   echo "$capture" | tail -3 | grep -qE '(^>|^\$|^%|claude|^[a-zA-Z0-9/~])'; then
+    echo "IDLE"
+    exit 0
+fi
+
+# Also detect explicit idle state: just a prompt character at the end
+last_nonblank=$(echo "$capture" | grep -v '^$' | tail -1)
+if echo "$last_nonblank" | grep -qE '^(>|\$|%) *$'; then
+    echo "IDLE"
+    exit 0
+fi
+
+# Priority 4: SHELL (not running claude - regular bash/zsh prompt)
+# Detect standard shell prompts without claude indicators
+if echo "$last_nonblank" | grep -qE '(\$|#|%) *$' && \
+   ! echo "$capture" | grep -qiE '(claude|anthropic|sonnet|opus|haiku)'; then
+    echo "SHELL"
+    exit 0
+fi
+
+# Fallback
+echo "UNKNOWN"

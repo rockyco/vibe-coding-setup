@@ -1,0 +1,56 @@
+#!/bin/bash
+# claude-review-status: Status bar counter for worktrees with unreviewed changes
+# Shows [N review] in tmux status bar when worktrees have pending changes
+# Uses file-based cache with 14s TTL to avoid hammering git
+
+CACHE_FILE="/tmp/claude-monitor/review-count.cache"
+CACHE_TTL=14
+STATE_DIR="$HOME/.local/state/claude-vibe"
+WORKTREE_PREFIX="claude-wt"
+
+mkdir -p /tmp/claude-monitor
+
+# Check cache
+if [[ -f "$CACHE_FILE" ]]; then
+    local_now=$(date +%s)
+    cache_mtime=$(stat -c %Y "$CACHE_FILE" 2>/dev/null || echo 0)
+    cache_age=$((local_now - cache_mtime))
+    if [[ $cache_age -lt $CACHE_TTL ]]; then
+        cat "$CACHE_FILE"
+        exit 0
+    fi
+fi
+
+# Count worktrees with changes
+count=0
+for state_file in "$STATE_DIR"/${WORKTREE_PREFIX}-*.state; do
+    [[ -f "$state_file" ]] || continue
+
+    worktree=$(grep "^worktree=" "$state_file" 2>/dev/null | cut -d= -f2-)
+    project=$(grep "^project=" "$state_file" 2>/dev/null | cut -d= -f2-)
+    [[ -d "$worktree" ]] || continue
+
+    # Get main branch
+    main_branch=$(git -C "$project" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
+    main_branch="${main_branch:-main}"
+
+    # Check if there are changes vs main
+    merge_base=$(git -C "$worktree" merge-base HEAD "$main_branch" 2>/dev/null)
+    if [[ -n "$merge_base" ]]; then
+        changes=$(git -C "$worktree" diff --name-only "$merge_base" 2>/dev/null | wc -l)
+        if [[ $changes -gt 0 ]]; then
+            count=$((count + 1))
+        fi
+    fi
+done
+
+# Build output
+output=""
+if [[ $count -gt 0 ]]; then
+    output="#[fg=yellow]${count} review#[default]"
+fi
+
+# Write cache
+echo -n "$output" > "$CACHE_FILE"
+
+echo -n "$output"
