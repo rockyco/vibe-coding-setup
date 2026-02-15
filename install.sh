@@ -160,15 +160,13 @@ cp "$SCRIPT_DIR/config/claude-session-menu" ~/bin/
 cp "$SCRIPT_DIR/config/claude-monitor-detect" ~/bin/
 cp "$SCRIPT_DIR/config/claude-monitor-daemon" ~/bin/
 cp "$SCRIPT_DIR/config/claude-monitor-dashboard" ~/bin/
-cp "$SCRIPT_DIR/config/claude-monitor-tui" ~/bin/
 cp "$SCRIPT_DIR/config/claude-monitor-statusbar" ~/bin/
 cp "$SCRIPT_DIR/config/claude-review" ~/bin/
 cp "$SCRIPT_DIR/config/claude-review-status" ~/bin/
 chmod +x ~/bin/claude-session ~/bin/claude-web \
     ~/bin/claude-session-menu \
     ~/bin/claude-monitor-detect ~/bin/claude-monitor-daemon \
-    ~/bin/claude-monitor-dashboard ~/bin/claude-monitor-tui \
-    ~/bin/claude-monitor-statusbar \
+    ~/bin/claude-monitor-dashboard ~/bin/claude-monitor-statusbar \
     ~/bin/claude-review ~/bin/claude-review-status
 
 # Create state directory for multi-agent sessions

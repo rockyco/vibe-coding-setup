@@ -97,7 +97,6 @@ claude-review --merge-interactive # merge strategy menu
 | Binding | Feature | Category |
 |---------|---------|----------|
 | `'M` | Session monitor dashboard | Multi-agent |
-| `'I` | Inspect: persistent monitor TUI | Multi-agent |
 | `'A` | Add new worktree session | Multi-agent |
 | `'F` | Finish current worktree | Multi-agent |
 | `Alt+1-4` | Direct session switching | Multi-agent |
