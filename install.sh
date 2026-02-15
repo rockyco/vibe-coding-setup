@@ -58,9 +58,6 @@ print_header
 echo ""
 echo "This script will set up:"
 echo "  - claude-session script for managing tmux sessions"
-echo "  - Multi-agent worktree sessions (parallel coding agents)"
-echo "  - Session monitor with live status and notifications"
-echo "  - Code review and merge workflow tools"
 echo "  - Mobile-friendly tmux configuration"
 echo "  - systemd services for auto-start"
 echo "  - Web terminal (agentboard or ttyd)"
@@ -156,21 +153,7 @@ mkdir -p ~/bin
 # Copy scripts
 cp "$SCRIPT_DIR/config/claude-session" ~/bin/
 cp "$SCRIPT_DIR/config/claude-web" ~/bin/
-cp "$SCRIPT_DIR/config/claude-session-menu" ~/bin/
-cp "$SCRIPT_DIR/config/claude-monitor-detect" ~/bin/
-cp "$SCRIPT_DIR/config/claude-monitor-daemon" ~/bin/
-cp "$SCRIPT_DIR/config/claude-monitor-dashboard" ~/bin/
-cp "$SCRIPT_DIR/config/claude-monitor-statusbar" ~/bin/
-cp "$SCRIPT_DIR/config/claude-review" ~/bin/
-cp "$SCRIPT_DIR/config/claude-review-status" ~/bin/
-chmod +x ~/bin/claude-session ~/bin/claude-web \
-    ~/bin/claude-session-menu \
-    ~/bin/claude-monitor-detect ~/bin/claude-monitor-daemon \
-    ~/bin/claude-monitor-dashboard ~/bin/claude-monitor-statusbar \
-    ~/bin/claude-review ~/bin/claude-review-status
-
-# Create state directory for multi-agent sessions
-mkdir -p ~/.local/state/claude-vibe/ports
+chmod +x ~/bin/claude-session ~/bin/claude-web
 
 log_success "Scripts installed to ~/bin/"
 
@@ -335,31 +318,25 @@ echo ""
 if [[ "$WEB_TERMINAL" == "agentboard" ]]; then
     echo -e "  ${BLUE}http://${TAILSCALE_IP}:4040${NC}"
     echo ""
+    echo "Quick commands:"
+    echo "  claude-session       - Attach to session locally"
+    echo "  claude-session -l    - List sessions"
+    echo "  claude-session -r    - Recreate session"
+    echo ""
     echo "Services:"
     echo "  systemctl --user status agentboard.service"
     echo "  systemctl --user status claude-tmux.service"
 else
     echo -e "  ${BLUE}http://${TAILSCALE_IP}:7681${NC}"
     echo ""
+    echo "Quick commands:"
+    echo "  claude-session       - Attach to session locally"
+    echo "  claude-session -l    - List sessions"
+    echo "  claude-session -r    - Recreate session"
+    echo ""
     echo "Services:"
     echo "  systemctl --user status ttyd.service"
     echo "  systemctl --user status claude-tmux.service"
-fi
-echo ""
-echo "Session management:"
-echo "  claude-session           Attach to default session"
-echo "  claude-session -w NAME   Create worktree agent session"
-echo "  claude-session -W        List worktree sessions"
-echo "  claude-session -f NAME   Finish worktree + cleanup"
-echo ""
-echo "Tmux keybindings (prefix = single quote):"
-echo "  'M  Session monitor       'A  Add worktree session"
-echo "  'R  Review dashboard       'G  Change summary"
-echo "  'E  Full diff              'B  File browser"
-echo "  'O  Merge workflow         'F  Finish worktree"
-echo ""
-if ! command -v delta &> /dev/null; then
-    log_info "Tip: Install 'delta' for enhanced diff viewing: https://github.com/dandavison/delta"
 fi
 echo ""
 echo "On your phone:"

@@ -11,7 +11,6 @@ WorkingDirectory=%h/.agentboard-app
 Environment=NODE_ENV=production
 Environment=PORT=4040
 Environment=TMUX_SESSION=claude-main
-Environment=DISCOVER_PREFIXES=claude-wt
 # Wait for Tailscale to be ready (interface up, IP assigned) before starting
 ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do tailscale ip -4 >/dev/null 2>&1 && exit 0; sleep 2; done; echo "Tailscale not ready after 120s"; exit 1'
 # Resolve Tailscale IP at start and pass as HOSTNAME
