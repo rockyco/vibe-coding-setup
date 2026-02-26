@@ -473,6 +473,14 @@ set -g pane-active-border-style 'fg=#32cd32'
 - **VPN encryption**: All traffic encrypted via WireGuard (Tailscale)
 - **Optional auth**: Can add password protection to ttyd
 
+## Running Tests
+
+```bash
+bash test/test-install.sh
+```
+
+The test suite validates the project without requiring installation - it checks bash syntax, required system commands, config file presence and permissions, systemd service structure, tmux.conf settings, and install.sh correctness. Tests run in seconds and exit with a non-zero status on any failure.
+
 ## Contributing
 
 Pull requests welcome! Areas for improvement:
